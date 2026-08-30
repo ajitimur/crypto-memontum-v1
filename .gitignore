@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Research data and results
+#   Raw pulls and derived frames are too large for git and are rebuilt by script;
+#   keep them in object storage and track only the fetch/build config.
+data/
+results/
+*.parquet
+*.feather
+*.h5
+
+# Agent-local settings
+.claude/settings.local.json
