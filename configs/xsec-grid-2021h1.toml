@@ -1,0 +1,72 @@
+# The whole Grid: Han, Kang and Ryu's 21 (lookback, holding) pairs, one run.
+#
+# `configs/xsec-l14-h7-2021h1.toml` is one cell of this. It exists because a
+# single cell is the smallest thing that puts the whole path under load; this
+# exists because a single cell is not evidence. A result is judged on the shape
+# of the grid, and quoting the best of 21 pairs is precisely the mining Han et
+# al. correct for when they hold their own grid to t > 3.0 rather than t > 2.0.
+#
+# Every cell is appended to `trials.jsonl` and each counts as its own
+# configuration tried — 21, not 1 — including the ones we would rather forget.
+#
+# The window sits inside the Development Sample (through 2023-12-31), so running
+# this spends none of the Holdout.
+#
+# Per ADR-0004 this is long-only unlevered spot: no short leg, no leverage, and
+# no Trend Gate. A risk overlay the paper did not have would invalidate the
+# comparison the Replication Gate is for.
+
+name = "xsec-grid-2021h1"
+
+[data]
+venue = "binance-spot"
+interval = "1d"
+start_month = "2021-01"
+end_month = "2021-06"
+
+# The USDT pairs Binance had listed before the window opens, so no name enters
+# the cross-section mid-run on a listing this config chose with hindsight. The
+# archive still decides tradeability per date: a symbol here that the archive
+# publishes no bars for on a date is untradeable on it, whatever this list says.
+#
+# Stablecoins and Wrapped Assets are not listed here and would be removed by
+# `policy/exclusions-v1.toml` if they were — the exclusion list is the authority,
+# not this list, so the two cannot disagree silently.
+symbols = [
+  "BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "XRPUSDT",
+  "DOGEUSDT", "LTCUSDT", "LINKUSDT", "DOTUSDT", "BCHUSDT",
+  "XLMUSDT", "TRXUSDT", "EOSUSDT", "ETCUSDT", "VETUSDT",
+  "FILUSDT", "THETAUSDT", "AAVEUSDT", "ATOMUSDT", "NEOUSDT",
+]
+
+[strategy]
+kind = "cross_sectional"
+# The published grid, by name. A grid this repo wrote for itself would not be
+# something the Replication Gate could be run against, so the 21 pairs live in
+# `sim/grid.py` beside their citation and a config chooses between grids rather
+# than composing one. `lookback_days` and `holding_days` are the grid's to set.
+grid = "han-kang-ryu-21"
+# The top quintile.
+quantile = 0.2
+
+[universe]
+# The upper bound of the bracket. The lower bound — today's Tokocrypto list — is
+# the same config with `bracket = "tokocrypto"`, and the gap between the two is
+# venue-listing risk and a result in its own right.
+bracket = "binance-full"
+# A data-quality gate on artefacted bars, not a capacity constraint: at USD
+# 5,000-10,000 deployed, capacity binds on nothing in this cross-section.
+liquidity_floor_usd = 250000.0
+
+[costs]
+# ADR-0007: Tokocrypto charges 0.15% fee + 0.21% PPh + 0.0444% levy per side, on
+# buys as well as sells. Across a grid whose holding periods run from 3 days to
+# 28, this is what separates the cells rather than the signal.
+model = "tokocrypto"
+slippage_bps_per_side = 5.0
+# The turnover budget, at ADR-0007's ceiling. It applies per cell, so expect the
+# short-holding end of the grid to be refused for breaching it while the long
+# end is not — ADR-0007 predicts exactly that, and a grid that shows it is the
+# grid doing its job. Each refusal is recorded in `trials.jsonl` with the
+# realised figure, so a cell that never produced a result is still counted.
+turnover_budget_weekly = 0.25
