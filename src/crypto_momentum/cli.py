@@ -36,7 +36,11 @@ from crypto_momentum.runner import (
     run_config,
 )
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars
-from crypto_momentum.sim.cross_sectional import NotEnoughHistory, SelectionError
+from crypto_momentum.sim.cross_sectional import (
+    NotEnoughHistory,
+    SelectionError,
+    TurnoverBudgetBreached,
+)
 from crypto_momentum.sim.universe_policy import PolicyError
 from crypto_momentum.trials import read_trials
 
@@ -67,6 +71,9 @@ REFUSALS = (
     SelectionError,
     SurvivorshipBiasedPanel,
     SymbolNotCovered,
+    # A breach of ADR-0007's turnover budget is a refusal like any other: the
+    # config is one we will not trade, and saying so in a line is the answer.
+    TurnoverBudgetBreached,
     UniverseError,
     UnmappableSymbol,
 )

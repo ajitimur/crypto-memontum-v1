@@ -26,7 +26,7 @@ end_month = "2021-02"
 kind = "buy_and_hold"
 
 [costs]
-fee_bps_per_side = 40.44
+model = "tokocrypto"
 slippage_bps_per_side = 5.0
 """
 
@@ -222,7 +222,9 @@ def test_the_config_is_fingerprinted_so_an_edited_config_is_a_different_trial(
     workspace, config_path, archive
 ):
     first = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
-    config_path.write_text(CONFIG_TEXT.replace("40.44", "10.0"))
+    # Same window, same asset, priced in the literature's cost world instead of
+    # Tokocrypto's: 15bp a side against 40.44, so the net path has to be better.
+    config_path.write_text(CONFIG_TEXT.replace('"tokocrypto"', '"paper"'))
     second = run_config(
         config_path, workspace, run_at_utc="2026-09-01T09:00:00Z", open_url=archive
     )

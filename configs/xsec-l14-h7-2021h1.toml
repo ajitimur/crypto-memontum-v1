@@ -62,5 +62,12 @@ liquidity_floor_usd = 250000.0
 # ADR-0007: Tokocrypto charges 0.15% fee + 0.21% PPh + 0.0444% levy per side, on
 # buys as well as sells. At a weekly rebalance this is the binding constraint,
 # not the signal.
-fee_bps_per_side = 40.44
+model = "tokocrypto"
 slippage_bps_per_side = 5.0
+# The turnover budget, at ADR-0007's ceiling. This cell is the paper's own
+# weekly configuration and is expected to breach it — a weekly top-quintile
+# rebalance churns roughly 68% of the book against a budget of 25%. That refusal
+# is the finding, not a bug: it is what "the tax probably kills this" looks like
+# from inside the runner, and it is why the Grid in #10 searches longer holding
+# periods rather than better signals.
+max_weekly_rebalance_turnover = 0.25

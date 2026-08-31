@@ -29,6 +29,10 @@ class RunRecord:
     # How the positions were formed: the strategy's own knobs, its turnover, its
     # exposure. Empty for a strategy that holds one thing and never trades again.
     portfolio: dict[str, Any] = field(default_factory=dict)
+    # What the run was priced in: the named cost model broken into fee, tax and
+    # levy, plus the slippage assumption. A net figure without this beside it is
+    # not a result, per the Net invariant.
+    costs: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +43,7 @@ class RunRecord:
             "config_sha256": self.config_sha256,
             "config": asdict(self.config),
             "window": self.window,
+            "costs": self.costs,
             "portfolio": self.portfolio,
             "metrics": self.metrics,
         }
@@ -63,6 +68,7 @@ class RunRecord:
             "strategy_kind": self.config.strategy_kind,
             "start_month": self.config.start_month,
             "end_month": self.config.end_month,
+            "cost_model": self.config.cost_model.name,
             "cost_bps_per_side": self.config.cost_bps_per_side,
             # The headline shape of the portfolio, so the log answers "how much
             # did this one trade" without opening the result file. The full
@@ -73,6 +79,7 @@ class RunRecord:
                     "n_rebalances",
                     "mean_n_positions",
                     "mean_rebalance_turnover",
+                    "weekly_rebalance_turnover",
                     "mean_net_exposure",
                 )
                 if key in self.portfolio

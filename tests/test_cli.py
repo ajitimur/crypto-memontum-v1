@@ -21,7 +21,7 @@ end_month = "2021-02"
 kind = "buy_and_hold"
 
 [costs]
-fee_bps_per_side = 40.44
+model = "tokocrypto"
 slippage_bps_per_side = 5.0
 """
 
@@ -34,6 +34,30 @@ def test_an_invalid_config_refuses_with_a_message_and_a_non_zero_exit(tmp_path, 
 
     assert exit_code == EXIT_REFUSED
     assert "start_month" in capsys.readouterr().err
+
+
+def test_a_config_over_the_turnover_ceiling_refuses_before_it_fetches_anything(
+    tmp_path, capsys
+):
+    # ADR-0007's ceiling at the loader. The window here is valid and the archive
+    # is never reachable in this test, so the run has to be refused on the budget
+    # alone — before a single bar would have been fetched.
+    config = tmp_path / "greedy.toml"
+    config.write_text(
+        BAD_CONFIG.replace('start_month = "not-a-month"', 'start_month = "2021-01"')
+        .replace(
+            "slippage_bps_per_side = 5.0",
+            "slippage_bps_per_side = 5.0\nmax_weekly_rebalance_turnover = 0.68",
+        )
+    )
+
+    exit_code = main(["--repo-root", str(tmp_path), "run", str(config)])
+
+    err = capsys.readouterr().err
+    assert exit_code == EXIT_REFUSED
+    assert "max_weekly_rebalance_turnover" in err
+    assert "25% weekly" in err
+    assert not any(tmp_path.rglob("*.zip"))
 
 
 def test_trials_reports_how_many_configurations_were_tried(tmp_path, capsys):

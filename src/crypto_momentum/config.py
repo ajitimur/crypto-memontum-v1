@@ -14,6 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from crypto_momentum.costs import (
+    COST_MODEL_NAMES,
+    TURNOVER_CEILING_WEEKLY,
+    CostModel,
+    CostModelError,
+    cost_model,
+)
 from crypto_momentum.sim.cross_sectional import (
     DEFAULT_CAP_STALENESS_DAYS,
     MIN_UNIVERSE,
@@ -56,7 +63,7 @@ _SCHEMA: dict[str, tuple[str, ...]] = {
     "data": ("venue", "symbol", "symbols", "interval", "start_month", "end_month"),
     "strategy": ("kind", *_STRATEGY_KEYS[CROSS_SECTIONAL]),
     "universe": ("bracket", "liquidity_floor_usd", "liquidity_window_days"),
-    "costs": ("fee_bps_per_side", "slippage_bps_per_side"),
+    "costs": ("model", "slippage_bps_per_side", "max_weekly_rebalance_turnover"),
 }
 _TOP_LEVEL_KEYS = ("name",)
 
@@ -80,12 +87,19 @@ class RunConfig:
     start_month: str
     end_month: str
     strategy_kind: str
-    fee_bps_per_side: float
+    # A named model rather than a loose number of basis points: the venue's cost
+    # structure is an ADR decision with three components behind it, and a config
+    # that could write its own 12.0 there would be quoting a venue nobody chose.
+    cost_model: CostModel
     slippage_bps_per_side: float
     # A single-asset hold names one `symbol`; a cross-section names `symbols`.
     # Exactly one of the two is set, so `universe_symbols` is the only thing
     # downstream code has to look at.
     symbols: tuple[str, ...] = ()
+    # The run's own turnover budget, at or below ADR-0007's weekly ceiling. A
+    # config may budget tighter than the ceiling; it may not budget looser, and
+    # the loader refuses one that tries before any bar is fetched.
+    max_weekly_rebalance_turnover: float = TURNOVER_CEILING_WEEKLY
     lookback_days: int | None = None
     holding_days: int | None = None
     quantile: float | None = None
@@ -110,12 +124,14 @@ class RunConfig:
 
     @property
     def cost_bps_per_side(self) -> float:
-        """Total round-trip-halved cost charged on both buys and sells.
+        """The model's cost plus this run's slippage, charged on buys and sells.
 
         Per ADR-0007 the Indonesian PPh applies to each leg, so this is charged
         on entry as well as exit — never haircut off a gross number afterwards.
         """
-        return self.fee_bps_per_side + self.slippage_bps_per_side
+        return self.cost_model.total_bps_per_side(
+            slippage_bps_per_side=self.slippage_bps_per_side
+        )
 
 
 def load_config(path: Path | str) -> RunConfig:
@@ -165,10 +181,11 @@ def load_config(path: Path | str) -> RunConfig:
         start_month=start_month,
         end_month=end_month,
         strategy_kind=strategy_kind,
-        fee_bps_per_side=_require_non_negative(costs, "fee_bps_per_side", "costs.fee_bps_per_side"),
+        cost_model=_require_cost_model(costs),
         slippage_bps_per_side=_require_non_negative(
             costs, "slippage_bps_per_side", "costs.slippage_bps_per_side"
         ),
+        max_weekly_rebalance_turnover=_require_turnover_budget(costs),
         bracket=_require_choice_or(
             universe, "bracket", "universe.bracket", BRACKETS, BINANCE_FULL
         ),
@@ -182,6 +199,53 @@ def load_config(path: Path | str) -> RunConfig:
         **_strategy_parameters(strategy, strategy_kind),
     )
     return config
+
+
+def _require_cost_model(costs: dict[str, Any]) -> CostModel:
+    """The named cost model this run pays, per ADR-0007.
+
+    A name rather than a number, so that what a result was net *of* is a venue
+    and a tax regime someone decided on, not an arbitrary basis-point figure that
+    happens to sit in a file.
+    """
+    name = _require_choice(costs, "model", "costs.model", COST_MODEL_NAMES)
+    try:
+        return cost_model(name)
+    except CostModelError as error:  # pragma: no cover — _require_choice gets there first
+        raise ConfigError(str(error)) from error
+
+
+def _require_turnover_budget(costs: dict[str, Any]) -> float:
+    """The run's weekly Rebalance Turnover budget, capped at ADR-0007's ceiling.
+
+    This is the load-time half of the ceiling: a config that *declares* it will
+    trade more than 25% of the book a week is refused here, before a single bar
+    is fetched. What it actually trades is not knowable until the walk, and the
+    simulator holds it to this same number there.
+
+    Omitting the key budgets the full ceiling. That is the loosest a run may be,
+    not a neutral default — ADR-0007 expects most tradeable configurations to sit
+    well under it.
+    """
+    if "max_weekly_rebalance_turnover" not in costs:
+        return TURNOVER_CEILING_WEEKLY
+    budget = _require_non_negative(
+        costs, "max_weekly_rebalance_turnover", "costs.max_weekly_rebalance_turnover"
+    )
+    if budget <= 0.0:
+        raise ConfigError(
+            "costs.max_weekly_rebalance_turnover must be above 0 — a run "
+            "budgeted to trade nothing can never rebalance"
+        )
+    if budget > TURNOVER_CEILING_WEEKLY:
+        raise ConfigError(
+            f"costs.max_weekly_rebalance_turnover is {budget:.4g}, above the "
+            f"{TURNOVER_CEILING_WEEKLY:.0%} weekly Rebalance Turnover ceiling "
+            "ADR-0007 sets. At 0.8088% per round trip a config trading more than "
+            "this pays away its own edge, so the run is rejected rather than "
+            "executed and reported with a caveat."
+        )
+    return budget
 
 
 def _reject_unknown_keys(document: dict[str, Any]) -> None:

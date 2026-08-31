@@ -20,7 +20,10 @@ end_month = "2021-03"
 kind = "buy_and_hold"
 
 [costs]
-# ADR-0007: Tokocrypto charges 0.15% fee + 0.21% PPh + 0.0444% levy per side,
-# on buys as well as sells. Slippage is nominal on BTCUSDT at this size.
-fee_bps_per_side = 40.44
+# ADR-0007: Tokocrypto charges 0.15% fee + 0.21% PPh + 0.0444% levy per side, on
+# buys as well as sells. The model is named rather than spelled out in basis
+# points so a result can be read back against the ADR's own table.
+model = "tokocrypto"
+# Nominal on BTCUSDT at this size. Not part of the model: slippage is an
+# assumption about our own order against the book, not the venue's price list.
 slippage_bps_per_side = 5.0

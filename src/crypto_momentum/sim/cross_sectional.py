@@ -43,10 +43,9 @@ from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
+from crypto_momentum.costs import BPS, TURNOVER_CEILING_WEEKLY, weekly_turnover
 from crypto_momentum.sim.marking import MarkedPath, is_tradeable_bar, mark_daily
 from crypto_momentum.sim.report import WINDOW_END, RunResult, summarise
-
-BPS = 1e-4
 
 # A fifth. The quintile the literature ranks on, and the default the Grid varies
 # nothing else against.
@@ -71,6 +70,28 @@ class NotEnoughHistory(Exception):
 
 class SelectionError(Exception):
     """A cross-section could not be ranked or weighted. Nothing is guessed at."""
+
+
+class TurnoverBudgetBreached(Exception):
+    """The walk traded more than the config budgeted, so it produces no result.
+
+    The run-time half of ADR-0007's ceiling. The config loader refuses a budget
+    above 25% weekly before the run starts; this refuses a run that turns out to
+    breach the budget it declared. It carries the realised figure, because a
+    researcher's next move is to widen the holding period or add a no-trade band
+    until the number fits, and they need to know by how much it missed.
+    """
+
+    def __init__(self, realised: float, budget: float, *, holding_days: int) -> None:
+        self.realised_weekly_turnover = realised
+        self.budget = budget
+        super().__init__(
+            f"the walk turned over {realised:.1%} of the book a week against a "
+            f"budget of {budget:.1%} (measured over a {holding_days}-day holding "
+            "period and put on a weekly footing). ADR-0007 budgets turnover "
+            "rather than observing it, so this run is refused rather than filed "
+            "as a result that breaches the ceiling."
+        )
 
 
 @dataclass(frozen=True)
@@ -132,6 +153,7 @@ class CrossSectionalRun:
     quantile: float
     min_universe: int
     max_cap_staleness_days: int
+    max_weekly_rebalance_turnover: float
 
     @property
     def n_rebalances(self) -> int:
@@ -142,12 +164,40 @@ class CrossSectionalRun:
         return sum(1 for selection in self.selections if selection.held_cash)
 
     @property
+    def rebalance_turnovers(self) -> tuple[float, ...]:
+        """One-way turnover at each rebalance that *replaced* a book.
+
+        The first fill is excluded. It buys the opening position from cash, so it
+        turns over 100% by construction whatever the signal did, and it happens
+        once however long the run is. Averaging it in would make a short window
+        look like it churned more than a long one running the identical strategy,
+        and would put every configuration over the ceiling on its first week.
+
+        Its cost is charged all the same — the walk pays for that first buy like
+        any other. What is excluded here is only its contribution to the ongoing
+        rate the ceiling budgets.
+        """
+        return tuple(selection.turnover for selection in self.selections[1:])
+
+    @property
     def mean_rebalance_turnover(self) -> float:
-        return _mean(selection.turnover for selection in self.selections)
+        return _mean(self.rebalance_turnovers)
 
     @property
     def max_rebalance_turnover(self) -> float:
-        return max((selection.turnover for selection in self.selections), default=0.0)
+        return max(self.rebalance_turnovers, default=0.0)
+
+    @property
+    def weekly_rebalance_turnover(self) -> float:
+        """Mean Rebalance Turnover on the weekly footing ADR-0007's ceiling uses.
+
+        A per-rebalance figure is not comparable to a weekly ceiling unless the
+        rebalance happens to be weekly, and the whole point of the ceiling is to
+        make longer holding periods look as attractive as they are.
+        """
+        return weekly_turnover(
+            self.mean_rebalance_turnover, holding_days=self.holding_days
+        )
 
     @property
     def mean_n_positions(self) -> float:
@@ -186,6 +236,12 @@ class CrossSectionalRun:
             "mean_n_positions": self.mean_n_positions,
             "mean_rebalance_turnover": self.mean_rebalance_turnover,
             "max_rebalance_turnover": self.max_rebalance_turnover,
+            # The three together are the reporting protocol's "Rebalance
+            # Turnover, against the ceiling": what was traded, on the footing the
+            # ceiling is stated on, and what it was held to.
+            "weekly_rebalance_turnover": self.weekly_rebalance_turnover,
+            "max_weekly_rebalance_turnover": self.max_weekly_rebalance_turnover,
+            "turnover_ceiling_weekly": TURNOVER_CEILING_WEEKLY,
             "mean_gross_exposure": self.mean_gross_exposure,
             "mean_net_exposure": self.mean_gross_exposure,
             "max_gross_exposure": self.max_gross_exposure,
@@ -332,6 +388,7 @@ def simulate_cross_sectional(
     quantile: float = DEFAULT_QUANTILE,
     min_universe: int = MIN_UNIVERSE,
     max_cap_staleness_days: int = DEFAULT_CAP_STALENESS_DAYS,
+    max_weekly_rebalance_turnover: float = TURNOVER_CEILING_WEEKLY,
 ) -> CrossSectionalRun:
     """Run the cross-sectional strategy over the window the bars span.
 
@@ -346,11 +403,28 @@ def simulate_cross_sectional(
     The walk runs twice, identically, once with `cost_bps_per_side` charged on
     both legs of every trade and once with it switched off. The costless walk is
     the gross path the reporting block compares against.
+
+    `max_weekly_rebalance_turnover` is the budget the run declared. What the walk
+    actually trades is only knowable once it has been walked, so the budget is
+    checked at the end and a breach raises `TurnoverBudgetBreached` instead of
+    returning a run. ADR-0007 budgets turnover rather than observing it: a
+    breaching configuration is not a result with a footnote, it is a
+    configuration we do not trade.
     """
     if holding_days < 1:
         raise SelectionError(f"holding_days must be at least 1, got {holding_days}")
     if min_universe < 1:
         raise SelectionError(f"min_universe must be at least 1, got {min_universe}")
+    # The budget must be a budget; whether it is a *permissible* budget is the
+    # config loader's question, not this one. ADR-0007's 25% ceiling is a policy
+    # about which configurations we are willing to run, and duplicating it here
+    # would put the policy in two places and leave the core unable to walk the
+    # high-turnover regime the ADR is an argument about.
+    if max_weekly_rebalance_turnover <= 0.0:
+        raise SelectionError(
+            "max_weekly_rebalance_turnover must be above 0, got "
+            f"{max_weekly_rebalance_turnover}"
+        )
 
     prices = _AlignedPrices.of(bars_by_symbol)
     gate = _aligned_gate(tradeable, prices.index, prices.columns)
@@ -382,7 +456,7 @@ def simulate_cross_sectional(
         cost_bps_per_side=cost_bps_per_side,
         exit_reason=WINDOW_END,
     )
-    return CrossSectionalRun(
+    run = CrossSectionalRun(
         result=result,
         selections=tuple(charged.selections),
         halt_exits=tuple(charged.halt_exits),
@@ -392,7 +466,15 @@ def simulate_cross_sectional(
         quantile=quantile,
         min_universe=min_universe,
         max_cap_staleness_days=max_cap_staleness_days,
+        max_weekly_rebalance_turnover=max_weekly_rebalance_turnover,
     )
+    if run.weekly_rebalance_turnover > max_weekly_rebalance_turnover:
+        raise TurnoverBudgetBreached(
+            run.weekly_rebalance_turnover,
+            max_weekly_rebalance_turnover,
+            holding_days=holding_days,
+        )
+    return run
 
 
 @dataclass(frozen=True)

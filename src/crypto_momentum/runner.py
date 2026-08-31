@@ -108,6 +108,7 @@ def run_config(
         config_path=_relative_to_repo(config_path, workspace.repo_root),
         metrics=metrics,
         window=window,
+        costs=cost_metadata(config),
         portfolio=portfolio,
     )
     ResultStore(workspace.results_root).write(record)
@@ -203,6 +204,7 @@ def _run_cross_sectional(
         min_universe=config.min_universe,
         max_cap_staleness_days=config.max_cap_staleness_days,
         cost_bps_per_side=config.cost_bps_per_side,
+        max_weekly_rebalance_turnover=config.max_weekly_rebalance_turnover,
     )
 
     spans = [bars.index for bars in bars_by_symbol.values()]
@@ -395,6 +397,21 @@ def metrics_of(result: RunResult) -> dict[str, Any]:
         "max_drawdown_trough_ts_utc": _iso(result.max_drawdown_trough_ts_utc),
         "cost_drag_annualised": result.cost_drag_annualised,
         "cost_drag_as_fraction_of_gross": result.cost_drag_as_fraction_of_gross,
+    }
+
+
+def cost_metadata(config: RunConfig) -> dict[str, Any]:
+    """What the result records about the cost world the run was priced in.
+
+    The model's components rather than the single figure the walk charged: a
+    result that says only "45.44 bps" cannot be read back against ADR-0007's
+    table, and cannot be compared to the paper's own 15bp assumption without
+    someone re-deriving which parts of it were tax.
+    """
+    return {
+        **config.cost_model.to_metadata(),
+        "slippage_bps_per_side": config.slippage_bps_per_side,
+        "total_bps_per_side": config.cost_bps_per_side,
     }
 
 
