@@ -91,7 +91,7 @@ Reproducing the shape of Han, Kang and Ryu's published grid on their own sample 
 _Avoid_: validation, sanity check, baseline
 
 **Rebalance Turnover**:
-The fraction of the portfolio traded at a rebalance. The quantity that pays for a strategy's edge, and reported alongside every result. Measured one-way and over the rebalances that replaced a book — the opening buy from cash turns over everything by construction and is excluded. Put on a weekly footing before it is compared to the ceiling, so holding periods of different lengths rank against each other honestly.
+The fraction of the portfolio traded at a rebalance. The quantity that pays for a strategy's edge, and reported alongside every result. Measured one-way — half of everything that changed hands, buys and sells together, so that going to cash and coming back from it each count for what they cost rather than one counting double and the other not at all. The opening fill is excluded: it buys the first book from cash by construction, whatever the signal did, and happens once however long the run is. Put on a weekly footing before it is compared to the ceiling, so holding periods of different lengths rank against each other honestly.
 _Avoid_: turnover, churn, trading volume
 
 **Cost Model**:

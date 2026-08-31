@@ -63,7 +63,7 @@ _SCHEMA: dict[str, tuple[str, ...]] = {
     "data": ("venue", "symbol", "symbols", "interval", "start_month", "end_month"),
     "strategy": ("kind", *_STRATEGY_KEYS[CROSS_SECTIONAL]),
     "universe": ("bracket", "liquidity_floor_usd", "liquidity_window_days"),
-    "costs": ("model", "slippage_bps_per_side", "max_weekly_rebalance_turnover"),
+    "costs": ("model", "slippage_bps_per_side", "turnover_budget_weekly"),
 }
 _TOP_LEVEL_KEYS = ("name",)
 
@@ -99,7 +99,7 @@ class RunConfig:
     # The run's own turnover budget, at or below ADR-0007's weekly ceiling. A
     # config may budget tighter than the ceiling; it may not budget looser, and
     # the loader refuses one that tries before any bar is fetched.
-    max_weekly_rebalance_turnover: float = TURNOVER_CEILING_WEEKLY
+    turnover_budget_weekly: float = TURNOVER_CEILING_WEEKLY
     lookback_days: int | None = None
     holding_days: int | None = None
     quantile: float | None = None
@@ -185,7 +185,7 @@ def load_config(path: Path | str) -> RunConfig:
         slippage_bps_per_side=_require_non_negative(
             costs, "slippage_bps_per_side", "costs.slippage_bps_per_side"
         ),
-        max_weekly_rebalance_turnover=_require_turnover_budget(costs),
+        turnover_budget_weekly=_require_turnover_budget(costs),
         bracket=_require_choice_or(
             universe, "bracket", "universe.bracket", BRACKETS, BINANCE_FULL
         ),
@@ -227,19 +227,19 @@ def _require_turnover_budget(costs: dict[str, Any]) -> float:
     not a neutral default — ADR-0007 expects most tradeable configurations to sit
     well under it.
     """
-    if "max_weekly_rebalance_turnover" not in costs:
+    if "turnover_budget_weekly" not in costs:
         return TURNOVER_CEILING_WEEKLY
     budget = _require_non_negative(
-        costs, "max_weekly_rebalance_turnover", "costs.max_weekly_rebalance_turnover"
+        costs, "turnover_budget_weekly", "costs.turnover_budget_weekly"
     )
     if budget <= 0.0:
         raise ConfigError(
-            "costs.max_weekly_rebalance_turnover must be above 0 — a run "
+            "costs.turnover_budget_weekly must be above 0 — a run "
             "budgeted to trade nothing can never rebalance"
         )
     if budget > TURNOVER_CEILING_WEEKLY:
         raise ConfigError(
-            f"costs.max_weekly_rebalance_turnover is {budget:.4g}, above the "
+            f"costs.turnover_budget_weekly is {budget:.4g}, above the "
             f"{TURNOVER_CEILING_WEEKLY:.0%} weekly Rebalance Turnover ceiling "
             "ADR-0007 sets. At 0.8088% per round trip a config trading more than "
             "this pays away its own edge, so the run is rejected rather than "

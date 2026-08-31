@@ -35,7 +35,7 @@ from crypto_momentum.policy import (
     policy_root,
 )
 from crypto_momentum.provenance import describe_head
-from crypto_momentum.results import ResultStore, RunRecord
+from crypto_momentum.results import ResultStore, RunRecord, refused_trial_line
 from crypto_momentum.sim.buy_and_hold import simulate_buy_and_hold
 from crypto_momentum.sim.cross_sectional import (
     CrossSectionalRun,
@@ -113,13 +113,16 @@ def run_config(
     except TurnoverBudgetBreached as breach:
         append_trial(
             workspace.trials_path,
-            _refused_trial(
+            refused_trial_line(
                 config,
+                commit=provenance.commit,
+                working_tree_dirty=provenance.working_tree_dirty,
+                run_at_utc=run_at_utc,
                 config_path=_relative_to_repo(config_path, workspace.repo_root),
                 config_sha256=config_sha256,
-                provenance=provenance,
-                run_at_utc=run_at_utc,
-                breach=breach,
+                realised_weekly_turnover=breach.realised_weekly_turnover,
+                budget=breach.budget,
+                reason=str(breach),
             ),
         )
         raise
@@ -229,7 +232,7 @@ def _run_cross_sectional(
         min_universe=config.min_universe,
         max_cap_staleness_days=config.max_cap_staleness_days,
         cost_bps_per_side=config.cost_bps_per_side,
-        max_weekly_rebalance_turnover=config.max_weekly_rebalance_turnover,
+        turnover_budget_weekly=config.turnover_budget_weekly,
     )
 
     spans = [bars.index for bars in bars_by_symbol.values()]
@@ -422,41 +425,6 @@ def metrics_of(result: RunResult) -> dict[str, Any]:
         "max_drawdown_trough_ts_utc": _iso(result.max_drawdown_trough_ts_utc),
         "cost_drag_annualised": result.cost_drag_annualised,
         "cost_drag_as_fraction_of_gross": result.cost_drag_as_fraction_of_gross,
-    }
-
-
-def _refused_trial(
-    config: RunConfig,
-    *,
-    config_path: str,
-    config_sha256: str,
-    provenance: Any,
-    run_at_utc: str,
-    breach: TurnoverBudgetBreached,
-) -> dict[str, Any]:
-    """The trials line for a configuration that was tried and then refused.
-
-    Deliberately the same key as a successful trial — commit, config name and
-    fingerprint — so the log can be counted without filtering, and deliberately
-    carrying no metrics, because none were produced. `refused` is what tells the
-    two apart, and it names the number that did it.
-    """
-    return {
-        "run_at_utc": run_at_utc,
-        "commit": provenance.commit,
-        "working_tree_dirty": provenance.working_tree_dirty,
-        "config_name": config.name,
-        "config_path": config_path,
-        "config_sha256": config_sha256,
-        "strategy_kind": config.strategy_kind,
-        "start_month": config.start_month,
-        "end_month": config.end_month,
-        "cost_model": config.cost_model.name,
-        "cost_bps_per_side": config.cost_bps_per_side,
-        "refused": "turnover_budget_breached",
-        "weekly_rebalance_turnover": breach.realised_weekly_turnover,
-        "max_weekly_rebalance_turnover": breach.budget,
-        "refused_reason": str(breach),
     }
 
 

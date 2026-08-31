@@ -90,7 +90,7 @@ def rotation(
         quantile=1.0,
         min_universe=2,
         cost_bps_per_side=cost_bps_per_side,
-        max_weekly_rebalance_turnover=budget,
+        turnover_budget_weekly=budget,
     )
 
 
@@ -112,9 +112,10 @@ class TestTheHandComputedTurnover:
     def test_each_rotation_turns_over_exactly_half_the_book(self):
         run = rotation(cost_bps_per_side=0.0)
 
-        # The opening buy takes the whole book, by construction rather than by
-        # signal, which is why it is recorded but not measured.
-        assert run.selections[0].turnover == pytest.approx(1.0)
+        # The opening fill buys a whole book and sells nothing, so one-way it is
+        # half a book changing hands. Recorded, but not measured: it happens by
+        # construction rather than by signal, and once however long the run is.
+        assert run.selections[0].turnover == pytest.approx(0.5)
         assert run.rebalance_turnovers == pytest.approx((0.5, 0.5))
         assert run.mean_rebalance_turnover == pytest.approx(0.5)
         assert run.max_rebalance_turnover == pytest.approx(0.5)
@@ -141,6 +142,68 @@ class TestTheHandComputedTurnover:
         assert run.rebalance_turnovers == pytest.approx((0.5,))
         assert run.mean_rebalance_turnover == pytest.approx(0.5)
         assert run.weekly_rebalance_turnover == pytest.approx(0.25)
+
+
+class TestGoingToCashAndComingBack:
+    """A week in cash costs one round trip, and the measure has to say so.
+
+    Measuring the buy side alone got this backwards in both directions: the
+    rebalance that sold the whole book to sit in cash bought nothing and scored
+    zero, while the one that bought back in scored a whole book turned over —
+    when between them they cost exactly what one ordinary rotation costs.
+    """
+
+    def cash_week_market(self):
+        """The pair, with the value panel gone dark before the middle rebalance.
+
+        A missing capitalisation is unweightable, so both names drop out of the
+        cross-section for that Decision Bar and the book goes to cash. The
+        snapshot returns in time for the third, which buys back in.
+        """
+        bars, tradeable, _ = market()
+        caps = pd.DataFrame(
+            {"XUSDT": [3e9, float("nan"), 3e9], "YUSDT": [1e9, float("nan"), 1e9]},
+            index=pd.DatetimeIndex(WEEKLY_SNAPSHOTS, tz="UTC", name="ts_utc"),
+        )
+        return bars, tradeable, caps
+
+    def run(self, budget: float = 0.5):
+        bars, tradeable, caps = self.cash_week_market()
+        return simulate_cross_sectional(
+            bars,
+            tradeable=tradeable,
+            market_caps=caps,
+            lookback_days=1,
+            holding_days=7,
+            quantile=1.0,
+            min_universe=2,
+            cost_bps_per_side=0.0,
+            turnover_budget_weekly=budget,
+            max_cap_staleness_days=3,
+        )
+
+    def test_the_middle_rebalance_goes_to_cash(self):
+        run = self.run()
+
+        assert run.selections[1].held_cash
+        assert not run.selections[2].held_cash
+
+    def test_selling_out_and_buying_back_each_count_half_a_book(self):
+        run = self.run()
+
+        # Sold the lot, bought nothing: half a book one-way. Then bought the lot
+        # back: half a book again. Neither is zero, and neither is a whole book.
+        assert run.rebalance_turnovers == pytest.approx((0.5, 0.5))
+
+    def test_the_round_trip_through_cash_costs_one_ordinary_rotation(self):
+        # The whole point of the measure. A week out and a week back is the same
+        # 1.0 of two-way trading as a single full rotation, so the two have to
+        # report the same total turnover — otherwise the budget prices a cash
+        # week as either free or twice what it was.
+        through_cash = sum(self.run().rebalance_turnovers)
+        straight_rotation = rotation(cost_bps_per_side=0.0).rebalance_turnovers
+
+        assert through_cash == pytest.approx(sum(straight_rotation))
 
 
 class TestTheHandComputedNetFigure:
@@ -203,7 +266,7 @@ class TestTheBudgetTheRunnerEnforces:
     def test_a_walk_inside_its_budget_is_returned(self):
         run = rotation(cost_bps_per_side=0.0, budget=0.5)
 
-        assert run.weekly_rebalance_turnover <= run.max_weekly_rebalance_turnover
+        assert run.weekly_rebalance_turnover <= run.turnover_budget_weekly
 
     def test_a_window_with_nothing_to_measure_reports_none_not_zero(self):
         # A window ending right after the opening fill has one selection, so
@@ -224,7 +287,7 @@ class TestTheBudgetTheRunnerEnforces:
             quantile=1.0,
             min_universe=2,
             cost_bps_per_side=0.0,
-            max_weekly_rebalance_turnover=0.25,
+            turnover_budget_weekly=0.25,
         )
 
         assert len(run.selections) == 1
@@ -249,5 +312,5 @@ class TestTheBudgetTheRunnerEnforces:
 
         assert metadata["mean_rebalance_turnover"] == pytest.approx(0.5)
         assert metadata["weekly_rebalance_turnover"] == pytest.approx(0.5)
-        assert metadata["max_weekly_rebalance_turnover"] == pytest.approx(0.5)
+        assert metadata["turnover_budget_weekly"] == pytest.approx(0.5)
         assert metadata["turnover_ceiling_weekly"] == 0.25

@@ -103,9 +103,20 @@ class Selection:
     the Decision Bar can still be untradeable on the bar the order would fill on,
     and that is an execution failure rather than something to see coming.
 
-    `turnover` is one-way Rebalance Turnover — the share of the portfolio bought
-    at this rebalance — measured against the drifted weights it replaced. It is
-    the figure ADR-0007 puts a 25% weekly ceiling on.
+    `turnover` is one-way Rebalance Turnover, measured against the drifted
+    weights it replaced: half of everything that changed hands, buys and sells
+    together. It is the figure ADR-0007 puts a 25% weekly ceiling on.
+
+    Half the two-way total rather than the buy side alone, because the buy side
+    alone is only the same thing while the book stays fully invested. A
+    rebalance that goes to cash sells everything and buys nothing, and would
+    record as no turnover at all; one that comes back from cash buys everything
+    and would record as a whole book turned over, when between them the pair
+    cost exactly what one ordinary rotation costs. Halving the two-way total
+    prices all three the same, agrees with the buy side in the ordinary
+    fully-invested case the literature's ~68% figure describes, and stays
+    proportional to what the walk actually charges — which is what the ceiling
+    is protecting.
     """
 
     decision_ts_utc: pd.Timestamp
@@ -153,7 +164,7 @@ class CrossSectionalRun:
     quantile: float
     min_universe: int
     max_cap_staleness_days: int
-    max_weekly_rebalance_turnover: float
+    turnover_budget_weekly: float
 
     @property
     def n_rebalances(self) -> int:
@@ -211,11 +222,22 @@ class CrossSectionalRun:
         without trading — which reads like a run that comfortably cleared the
         ceiling rather than one that never tested it.
         """
-        if not self.rebalance_turnovers:
+        measured = self.rebalance_turnovers
+        if not measured:
             return None
-        return weekly_turnover(
-            self.mean_rebalance_turnover, holding_days=self.holding_days
-        )
+        return weekly_turnover(_mean(measured), holding_days=self.holding_days)
+
+    @property
+    def max_weekly_rebalance_turnover(self) -> float | None:
+        """The *worst* rebalance on the same weekly footing, reported beside the mean.
+
+        The budget binds on the mean, so this is what makes a run whose average
+        hides one very expensive rebalance visible rather than silent.
+        """
+        measured = self.rebalance_turnovers
+        if not measured:
+            return None
+        return weekly_turnover(max(measured), holding_days=self.holding_days)
 
     @property
     def mean_n_positions(self) -> float:
@@ -259,6 +281,12 @@ class CrossSectionalRun:
             # ceiling is stated on, and what it was held to.
             "weekly_rebalance_turnover": self.weekly_rebalance_turnover,
             "max_weekly_rebalance_turnover": self.max_weekly_rebalance_turnover,
+            # The two below are limits, not measurements. Named apart from the
+            # four above on purpose: `turnover_budget_weekly` next to
+            # `max_weekly_rebalance_turnover` used to read as the same quantity
+            # measured two ways, when one is what the run did and the other is
+            # what it was allowed to do.
+            "turnover_budget_weekly": self.turnover_budget_weekly,
             "turnover_ceiling_weekly": TURNOVER_CEILING_WEEKLY,
             "mean_gross_exposure": self.mean_gross_exposure,
             "mean_net_exposure": self.mean_gross_exposure,
@@ -406,7 +434,7 @@ def simulate_cross_sectional(
     quantile: float = DEFAULT_QUANTILE,
     min_universe: int = MIN_UNIVERSE,
     max_cap_staleness_days: int = DEFAULT_CAP_STALENESS_DAYS,
-    max_weekly_rebalance_turnover: float = TURNOVER_CEILING_WEEKLY,
+    turnover_budget_weekly: float = TURNOVER_CEILING_WEEKLY,
 ) -> CrossSectionalRun:
     """Run the cross-sectional strategy over the window the bars span.
 
@@ -422,7 +450,7 @@ def simulate_cross_sectional(
     both legs of every trade and once with it switched off. The costless walk is
     the gross path the reporting block compares against.
 
-    `max_weekly_rebalance_turnover` is the budget the run declared. What the walk
+    `turnover_budget_weekly` is the budget the run declared. What the walk
     actually trades is only knowable once it has been walked, so the budget is
     checked at the end and a breach raises `TurnoverBudgetBreached` instead of
     returning a run. ADR-0007 budgets turnover rather than observing it: a
@@ -438,10 +466,10 @@ def simulate_cross_sectional(
     # about which configurations we are willing to run, and duplicating it here
     # would put the policy in two places and leave the core unable to walk the
     # high-turnover regime the ADR is an argument about.
-    if max_weekly_rebalance_turnover <= 0.0:
+    if turnover_budget_weekly <= 0.0:
         raise SelectionError(
-            "max_weekly_rebalance_turnover must be above 0, got "
-            f"{max_weekly_rebalance_turnover}"
+            "turnover_budget_weekly must be above 0, got "
+            f"{turnover_budget_weekly}"
         )
 
     prices = _AlignedPrices.of(bars_by_symbol)
@@ -484,15 +512,15 @@ def simulate_cross_sectional(
         quantile=quantile,
         min_universe=min_universe,
         max_cap_staleness_days=max_cap_staleness_days,
-        max_weekly_rebalance_turnover=max_weekly_rebalance_turnover,
+        turnover_budget_weekly=turnover_budget_weekly,
     )
     realised = run.weekly_rebalance_turnover
     # `None` is "never measured", not "measured at zero". A window holding only
     # its opening fill has not been tested against the budget, so it does not get
     # to pass it either.
-    if realised is not None and realised > max_weekly_rebalance_turnover:
+    if realised is not None and realised > turnover_budget_weekly:
         raise TurnoverBudgetBreached(
-            realised, max_weekly_rebalance_turnover, holding_days=holding_days
+            realised, turnover_budget_weekly, holding_days=holding_days
         )
     return run
 
@@ -819,10 +847,8 @@ def _rebalance(
         for symbol in set(target_weights) | set(held_weights)
     ]
     # Both legs pay, per ADR-0007: `traded` counts the sells and the buys
-    # separately, and each is charged the per-side cost. `bought` is the buy side
-    # alone, which is one-way Rebalance Turnover as ADR-0007 measures it.
+    # separately, and each is charged the per-side cost.
     traded = sum(abs(change) for change in changes)
-    bought = sum(change for change in changes if change > 0.0)
     net_value = value - cost_per_side * traded * value
 
     new_units = {
@@ -841,7 +867,7 @@ def _rebalance(
             weights=target_weights,
             n_eligible=planned.n_eligible,
             unfilled=unfilled,
-            turnover=bought,
+            turnover=traded / 2.0,
         ),
     )
 

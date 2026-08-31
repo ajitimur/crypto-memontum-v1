@@ -68,20 +68,14 @@ class RunRecord:
         opening every result file.
         """
         return {
-            "run_at_utc": self.run_at_utc,
-            "commit": self.commit,
-            "working_tree_dirty": self.working_tree_dirty,
-            "config_name": self.config.name,
-            "config_path": self.config_path,
-            "config_sha256": self.config_sha256,
-            "symbol": self.config.symbol,
-            "n_symbols": len(self.config.universe_symbols),
-            "interval": self.config.interval,
-            "strategy_kind": self.config.strategy_kind,
-            "start_month": self.config.start_month,
-            "end_month": self.config.end_month,
-            "cost_model": self.config.cost_model.name,
-            "cost_bps_per_side": self.config.cost_bps_per_side,
+            **trial_identity(
+                self.config,
+                commit=self.commit,
+                working_tree_dirty=self.working_tree_dirty,
+                run_at_utc=self.run_at_utc,
+                config_path=self.config_path,
+                config_sha256=self.config_sha256,
+            ),
             # The headline shape of the portfolio, so the log answers "how much
             # did this one trade" without opening the result file. The full
             # block, halt exits and all, stays in the result.
@@ -98,6 +92,75 @@ class RunRecord:
             },
             **self.metrics,
         }
+
+
+def trial_identity(
+    config: RunConfig,
+    *,
+    commit: str,
+    working_tree_dirty: bool,
+    run_at_utc: str,
+    config_path: str,
+    config_sha256: str,
+) -> dict[str, Any]:
+    """Which run this line is about — the half every trials line shares.
+
+    One definition, because there are two kinds of line: a run that produced a
+    result, and a run refused for breaching its turnover budget. Both have to be
+    countable and identifiable in the same way, and building the keys twice is
+    how the two quietly drift into two schemas.
+    """
+    return {
+        "run_at_utc": run_at_utc,
+        "commit": commit,
+        "working_tree_dirty": working_tree_dirty,
+        "config_name": config.name,
+        "config_path": config_path,
+        "config_sha256": config_sha256,
+        "symbol": config.symbol,
+        "n_symbols": len(config.universe_symbols),
+        "interval": config.interval,
+        "strategy_kind": config.strategy_kind,
+        "start_month": config.start_month,
+        "end_month": config.end_month,
+        "cost_model": config.cost_model.name,
+        "cost_bps_per_side": config.cost_bps_per_side,
+    }
+
+
+def refused_trial_line(
+    config: RunConfig,
+    *,
+    commit: str,
+    working_tree_dirty: bool,
+    run_at_utc: str,
+    config_path: str,
+    config_sha256: str,
+    realised_weekly_turnover: float,
+    budget: float,
+    reason: str,
+) -> dict[str, Any]:
+    """The trials line for a configuration that was tried and then refused.
+
+    Deliberately the same identity as a successful trial, so the log can be
+    counted without filtering, and deliberately carrying no metrics, because none
+    were produced. `refused` is what tells the two apart, and it names the number
+    that did it.
+    """
+    return {
+        **trial_identity(
+            config,
+            commit=commit,
+            working_tree_dirty=working_tree_dirty,
+            run_at_utc=run_at_utc,
+            config_path=config_path,
+            config_sha256=config_sha256,
+        ),
+        "refused": "turnover_budget_breached",
+        "weekly_rebalance_turnover": realised_weekly_turnover,
+        "turnover_budget_weekly": budget,
+        "refused_reason": reason,
+    }
 
 
 class ResultStore:

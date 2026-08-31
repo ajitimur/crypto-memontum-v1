@@ -144,24 +144,24 @@ class TestTheTurnoverBudget:
     def test_omitting_the_budget_takes_the_full_ceiling(self, tmp_path):
         cfg = load_config(write(tmp_path, VALID))
 
-        assert cfg.max_weekly_rebalance_turnover == TURNOVER_CEILING_WEEKLY
+        assert cfg.turnover_budget_weekly == TURNOVER_CEILING_WEEKLY
 
     def test_a_tighter_budget_than_the_ceiling_is_allowed(self, tmp_path):
         text = VALID.replace(
             "slippage_bps_per_side = 5.0",
-            "slippage_bps_per_side = 5.0\nmax_weekly_rebalance_turnover = 0.1",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.1",
         )
 
         cfg = load_config(write(tmp_path, text))
 
-        assert cfg.max_weekly_rebalance_turnover == pytest.approx(0.1)
+        assert cfg.turnover_budget_weekly == pytest.approx(0.1)
 
     def test_a_budget_above_the_ceiling_is_rejected_before_the_run(self, tmp_path):
         # The literature's ~68% weekly turnover, declared honestly. ADR-0007
         # refuses it at the loader rather than executing and reporting it.
         text = VALID.replace(
             "slippage_bps_per_side = 5.0",
-            "slippage_bps_per_side = 5.0\nmax_weekly_rebalance_turnover = 0.68",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.68",
         )
 
         with pytest.raises(ConfigError, match="above the 25% weekly"):
@@ -170,15 +170,15 @@ class TestTheTurnoverBudget:
     def test_the_ceiling_itself_is_exactly_on_the_line_and_allowed(self, tmp_path):
         text = VALID.replace(
             "slippage_bps_per_side = 5.0",
-            "slippage_bps_per_side = 5.0\nmax_weekly_rebalance_turnover = 0.25",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.25",
         )
 
-        assert load_config(write(tmp_path, text)).max_weekly_rebalance_turnover == 0.25
+        assert load_config(write(tmp_path, text)).turnover_budget_weekly == 0.25
 
     def test_a_budget_of_nothing_is_rejected(self, tmp_path):
         text = VALID.replace(
             "slippage_bps_per_side = 5.0",
-            "slippage_bps_per_side = 5.0\nmax_weekly_rebalance_turnover = 0.0",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.0",
         )
 
         with pytest.raises(ConfigError, match="must be above 0"):

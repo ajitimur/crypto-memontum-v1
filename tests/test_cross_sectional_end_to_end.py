@@ -327,7 +327,7 @@ def test_rebalance_turnover_is_reported_against_the_ceiling(record):
         portfolio["mean_rebalance_turnover"]
     )
     assert portfolio["turnover_ceiling_weekly"] == 0.25
-    assert portfolio["max_weekly_rebalance_turnover"] == 0.25
+    assert portfolio["turnover_budget_weekly"] == 0.25
     # The run got as far as being recorded, so it stayed inside its budget.
     assert portfolio["weekly_rebalance_turnover"] <= 0.25
     # And it is far inside it, for a reason worth naming rather than pinning to a
@@ -349,7 +349,7 @@ def test_a_run_refused_on_turnover_is_still_counted_as_a_configuration_tried(
     config_path.write_text(
         CONFIG_TEXT.replace(
             "slippage_bps_per_side = 5.0",
-            "slippage_bps_per_side = 5.0\nmax_weekly_rebalance_turnover = 0.001",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.001",
         )
     )
 
@@ -359,7 +359,7 @@ def test_a_run_refused_on_turnover_is_still_counted_as_a_configuration_tried(
     trial = read_trials(workspace.trials_path)[0]
     assert trial["config_name"] == "xsec-l14-h7-2021q1"
     assert trial["refused"] == "turnover_budget_breached"
-    assert trial["max_weekly_rebalance_turnover"] == 0.001
+    assert trial["turnover_budget_weekly"] == 0.001
     assert trial["weekly_rebalance_turnover"] > 0.001
     # No metrics: nothing was produced, and an absent net_return is honest where
     # a zero would read as a run that broke even.
