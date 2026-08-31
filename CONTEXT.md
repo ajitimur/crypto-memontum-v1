@@ -56,6 +56,18 @@ _Avoid_: pegged asset, stable
 An asset that represents a claim on another asset already in the Universe, such as a bridged or liquid-staked token. Excluded permanently, because including it double-counts a single bet.
 _Avoid_: derivative token, synthetic, bridged token
 
+**Exclusion List**:
+The dated, versioned record of which assets are Stablecoins and which are Wrapped Assets, with the stated design intent each classification rests on. Hand-maintained, so every result quotes the version that produced it.
+_Avoid_: blacklist, filter list, ban list
+
+**Liquidity Floor**:
+A trailing median dollar volume threshold an asset clears to enter the Universe, read only from bars before the Decision Bar. A data-quality gate on artefacted bars, never a capacity constraint — at this account size capacity binds on almost nothing the archive publishes.
+_Avoid_: volume filter, minimum size, liquidity screen
+
+**Universe Bracket**:
+The pair of Universes a result is reported on: the full Binance archive as the upper bound and today's Tokocrypto listing as the lower. The gap between them is venue-listing risk, and quoting one bound alone hides which risk was chosen.
+_Avoid_: universe variant, listing scope, coverage option
+
 **Trend Gate**:
 A portfolio-level switch that holds the selected assets only while the market's own recent return is positive. A time-series overlay on a cross-sectional selection, not a competing strategy.
 _Avoid_: regime filter, market filter, risk overlay

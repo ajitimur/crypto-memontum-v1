@@ -1,0 +1,28 @@
+# The lower bound of the Universe bracket: what our own venue lists today.
+#
+# The upper bound is the full Binance archive, which is what the point-in-time
+# Universe reconstructs. The gap between the two is venue-listing risk — a
+# result that survives only on the upper bound is a result we could not have
+# traded from Indonesia — so both bounds are reported and neither is the answer
+# on its own.
+#
+# `status = "stub"` because this file has not yet been recorded from the venue.
+# The status travels into the metadata of every panel built on it, so a lower
+# bound resting on a stub says so in the result rather than passing as a
+# measurement. Replace `symbols` with a dated capture of Tokocrypto's USDT book,
+# bump `version`, and set `status = "recorded"`.
+
+venue = "tokocrypto"
+version = "v1"
+recorded_at = "2026-08-31"
+status = "stub"
+
+symbols = [
+  "BTCUSDT",
+  "ETHUSDT",
+  "BNBUSDT",
+  "SOLUSDT",
+  "XRPUSDT",
+  "ADAUSDT",
+  "DOGEUSDT",
+]
