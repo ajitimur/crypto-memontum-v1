@@ -3,11 +3,14 @@
 import json
 import subprocess
 
+import pandas as pd
 import pytest
 
-from crypto_momentum.config import ConfigError
+from crypto_momentum.config import ConfigError, RunConfig
 from crypto_momentum.data.binance_archive import ChecksumMismatch
-from crypto_momentum.runner import Workspace, run_config
+from crypto_momentum.runner import Workspace, _btc_over_the_same_window, run_config
+from crypto_momentum.sim.marking import mark_daily
+from crypto_momentum.sim.report import summarise
 from crypto_momentum.trials import read_trials
 
 RUN_AT = "2026-08-31T09:00:00Z"
@@ -263,15 +266,34 @@ def test_the_result_counts_the_configurations_tried_to_reach_it(
     workspace, config_path, archive
 ):
     """The count the protocol requires beside every quoted number, on the result
-    itself rather than only in the log a reader would have to go and count."""
+    itself rather than only in the log a reader would have to go and count.
+
+    Running the same bytes twice is one configuration tried, not two: a count
+    that rose on every re-run would read as a search that never happened."""
     first = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
     second = run_config(
         config_path, workspace, run_at_utc="2026-09-01T09:00:00Z", open_url=archive
     )
 
     assert first.configurations_tried == 1
+    assert second.configurations_tried == 1
+    assert second.trials_recorded == 2
+    assert read_trials(workspace.trials_path)[-1]["configurations_tried"] == 1
+
+
+def test_an_edited_config_is_another_configuration_tried(
+    workspace, config_path, archive
+):
+    """The count is of configurations, so editing one and running it again
+    raises it — that is the search the protocol asks to be declared."""
+    run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+    config_path.write_text(CONFIG_TEXT.replace("40.44", "10.0"))
+
+    second = run_config(
+        config_path, workspace, run_at_utc="2026-09-01T09:00:00Z", open_url=archive
+    )
+
     assert second.configurations_tried == 2
-    assert read_trials(workspace.trials_path)[-1]["configurations_tried"] == 2
 
 
 def test_btc_buy_and_hold_is_computed_on_every_run(workspace, config_path, archive):
@@ -297,3 +319,52 @@ def test_a_single_asset_run_says_why_it_has_no_market_portfolio(
     market = record.benchmarks["cap_weighted_market"]
     assert market["computed"] is False
     assert market["reason"]
+
+
+def test_the_hurdle_is_held_over_the_run_s_window_and_not_a_day_longer():
+    """A run that ended early must not be read against a Bitcoin that kept
+    compounding after it: ADR-0005 compares over the same window, both edges."""
+    index = pd.date_range("2021-01-01", periods=10, freq="D", tz="UTC", name="ts_utc")
+    bars = pd.DataFrame(
+        {
+            "open": [100.0] * 10,
+            "high": [100.0] * 10,
+            "low": [100.0] * 10,
+            "close": [100.0] * 10,
+            "volume": [1.0] * 10,
+        },
+        index=index,
+    )
+    # A strategy that stopped on the fifth bar, whatever the archive published after.
+    ended_early = summarise(
+        mark_daily(pd.Series(0.0, index=index[1:5], dtype=float)),
+        decision_ts_utc=index[0],
+        entry_price=1.0,
+        exit_price=1.0,
+        cost_bps_per_side=0.0,
+    )
+
+    btc, reason = _btc_over_the_same_window(
+        ended_early,
+        config=RunConfig(
+            name="held-over-the-same-window",
+            venue="binance-spot",
+            symbol="BTCUSDT",
+            interval="1d",
+            start_month="2021-01",
+            end_month="2021-01",
+            strategy_kind="buy_and_hold",
+            fee_bps_per_side=0.0,
+            slippage_bps_per_side=0.0,
+        ),
+        # The bars are already loaded, so nothing is read from the workspace.
+        workspace=None,
+        bars_by_symbol={"BTCUSDT": bars},
+        run_at_utc=RUN_AT,
+        open_url=None,
+    )
+
+    assert reason is None
+    assert btc.decision_ts_utc == ended_early.decision_ts_utc
+    assert btc.exit_ts_utc == ended_early.exit_ts_utc
+    assert btc.n_marks == ended_early.n_marks

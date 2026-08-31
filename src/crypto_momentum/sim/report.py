@@ -259,6 +259,14 @@ def newey_west_t_statistic(
     The Newey-West long-run variance widens the error by the autocovariances out
     to `lags`, Bartlett-weighted so the estimate stays non-negative.
 
+    The autocovariances and the variance of the mean both divide by T, the
+    textbook estimator, with no small-sample correction. On a window of a few
+    dozen marks that biases the standard error down and so the t-statistic up —
+    towards clearing a bar ADR-0002 set deliberately high. Read a t near 3.0 on
+    a short window as not yet decided rather than as cleared; the correction is
+    not applied silently here because a t-statistic computed two ways is not
+    comparable across runs.
+
     `None` when the series is too short to have a standard error, or has no
     dispersion left to divide by: an undefined t, not an infinite one.
     """

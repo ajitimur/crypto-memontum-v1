@@ -221,7 +221,9 @@ def _describe_profitability(reported: dict) -> str:
             "no t-statistic — the path has no finite mean log return to test "
             f"(mean log return {mean_log})"
         )
-    verdict = "clears" if t_statistic > PROFITABILITY_T_BAR else "below"
+    # The verdict is read off the result rather than re-derived here, so the bar
+    # is applied in exactly one place and moving it moves both.
+    verdict = "clears" if reported.get("clears_profitability_bar") else "below"
     return (
         f"mean log return {mean_log:.6f}/day, t = {t_statistic:.2f} "
         f"(Newey-West, {reported.get('newey_west_lags')} lags) — "
@@ -238,6 +240,14 @@ def _describe_divergence(reported: dict) -> str:
     """
     mean_return = reported.get("mean_return_daily_net")
     mean_log = reported.get("mean_log_return_daily_net")
+    if mean_log is None:
+        # The most extreme divergence there is — a path that compounds to
+        # nothing has no mean log return at all — so it is said, not skipped.
+        return (
+            f"mean return {mean_return} has no mean log return to be compared "
+            "with: the run was liquidated, and a wipeout compounds to nothing "
+            "whatever its mean return says"
+        )
     if not reported.get("mean_return_sign_divergence"):
         return f"mean return {mean_return} and mean log return {mean_log} agree in sign"
     return (

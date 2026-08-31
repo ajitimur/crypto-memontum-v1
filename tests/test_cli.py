@@ -127,6 +127,7 @@ CLEARED = {
     "newey_west_lags": 3,
     "mean_return_daily_net": 0.0025,
     "mean_return_sign_divergence": False,
+    "clears_profitability_bar": True,
 }
 
 
@@ -140,7 +141,13 @@ def test_the_profitability_line_quotes_the_statistic_that_decides():
 
 
 def test_a_run_below_the_bar_is_not_described_as_having_cleared_it():
-    line = _describe_profitability({**CLEARED, "mean_log_return_t_stat": 2.5})
+    line = _describe_profitability(
+        {
+            **CLEARED,
+            "mean_log_return_t_stat": 2.5,
+            "clears_profitability_bar": False,
+        }
+    )
 
     assert "below" in line
     assert "clears" not in line
@@ -169,6 +176,21 @@ def test_diverging_means_are_called_out_on_their_own_line():
 
 def test_means_that_agree_report_that_they_agree():
     assert "agree in sign" in _describe_divergence(CLEARED)
+
+
+def test_a_liquidated_run_says_it_has_no_mean_log_return_to_compare():
+    """The divergence line must not read as "they agree" on a path that has no
+    mean log return at all — that is the loudest version of the diagnostic."""
+    line = _describe_divergence(
+        {
+            **CLEARED,
+            "mean_log_return_daily_net": None,
+            "mean_return_sign_divergence": False,
+        }
+    )
+
+    assert "liquidated" in line
+    assert "agree in sign" not in line
 
 
 def test_the_hurdle_line_names_the_condition_that_failed():

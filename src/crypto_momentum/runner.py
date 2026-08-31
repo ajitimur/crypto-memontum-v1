@@ -132,10 +132,14 @@ def run_config(
         window=output.window,
         portfolio=output.portfolio,
         benchmarks=output.benchmarks,
-        # This run included: the protocol asks for the count of configurations
-        # tried to reach a quoted number, and the number being quoted is one of
-        # them. The log is appended below, so the count is taken before it.
-        configurations_tried=len(read_trials(workspace.trials_path)) + 1,
+        # Two different counts, because they answer two different questions. The
+        # protocol asks how many *configurations* were tried to reach a quoted
+        # number, so that is distinct config fingerprints and a config re-run
+        # unchanged does not inflate it — a 21-cell Grid run twice is 21 tried,
+        # not 42. How many runs were recorded is kept beside it. This run counts
+        # in both: it is one of the configurations the number came from. The log
+        # is appended below, so both are taken before it.
+        **_counts_tried(workspace.trials_path, config_sha256=config_sha256),
     )
     ResultStore(workspace.results_root).write(record)
     append_trial(workspace.trials_path, record.trial_line())
@@ -160,7 +164,21 @@ def _run_single_asset(
             "last_bar_ts_utc": _iso(bars.index[-1]),
             "n_bars": len(bars),
         },
-        portfolio={},
+        # A hold has no selection to describe, but the reporting block still
+        # asks how much was invested and in how many names, and the answer for
+        # a long-only unlevered single hold is: all of it, in one, every mark.
+        portfolio={
+            "strategy": config.strategy_kind,
+            "long_only": True,
+            "levered": False,
+            "trend_gate": False,
+            "n_rebalances": 1,
+            "mean_n_positions": 1.0,
+            "mean_gross_exposure": 1.0,
+            "mean_net_exposure": 1.0,
+            "max_gross_exposure": 1.0,
+            "mean_rebalance_turnover": 1.0,
+        },
         benchmarks=_benchmarks(
             result,
             config=config,
@@ -285,6 +303,25 @@ def _run_cross_sectional(
     )
 
 
+def _counts_tried(trials_path: Path, *, config_sha256: str) -> dict[str, int]:
+    """How many configurations have been tried, and how many runs recorded.
+
+    A configuration is its fingerprint, not its name: editing a config and
+    running it again is a second configuration tried, and running the same bytes
+    twice is not. A trial logged before fingerprints were recorded has no
+    fingerprint to count and is left out of the configuration count rather than
+    collapsed into one — it is still counted as a run.
+    """
+    trials = read_trials(trials_path)
+    fingerprints = {
+        trial["config_sha256"] for trial in trials if trial.get("config_sha256")
+    }
+    return {
+        "configurations_tried": len(fingerprints | {config_sha256}),
+        "trials_recorded": len(trials) + 1,
+    }
+
+
 def _benchmarks(
     result: RunResult,
     *,
@@ -324,9 +361,13 @@ def _benchmarks(
                 if market is None
                 else {
                     **metrics_of(market.result),
+                    # The same shape the strategy's own block reports, so the
+                    # reference is read on the criteria the run is read on.
                     "n_rebalances": market.n_rebalances,
                     "mean_n_positions": market.mean_n_positions,
                     "mean_rebalance_turnover": market.mean_rebalance_turnover,
+                    "mean_gross_exposure": market.mean_gross_exposure,
+                    "mean_net_exposure": market.mean_gross_exposure,
                 }
             ),
         },
@@ -345,10 +386,12 @@ def _btc_over_the_same_window(
 ) -> tuple[RunResult | None, str | None]:
     """BTC bought and held over the run's own window, or why it could not be.
 
-    The hold starts at the *strategy's* Decision Bar rather than the config's
-    first bar: a lookback the strategy spends warming up is not a window BTC was
-    held over, and comparing a hold over more days to one over fewer is not the
-    comparison ADR-0005 asks for.
+    Both edges are the strategy's, not the config's. The hold starts at the
+    strategy's Decision Bar, because a lookback the strategy spends warming up is
+    not a window BTC was held over; and it ends at the strategy's last mark,
+    because a run that halted or liquidated in February must not be read against
+    a Bitcoin that kept compounding until March. Comparing a hold over more days
+    to one over fewer is not the comparison ADR-0005 asks for.
 
     The bars are reused when the run already loaded them, and fetched through
     the same raw-then-derived path when it did not, so the hurdle never reads a
@@ -369,7 +412,9 @@ def _btc_over_the_same_window(
             )
         bars, _ = loaded
 
-    held = bars.loc[bars.index >= result.decision_ts_utc]
+    held = bars.loc[
+        (bars.index >= result.decision_ts_utc) & (bars.index <= result.exit_ts_utc)
+    ]
     try:
         return btc_buy_and_hold(held, cost_bps_per_side=config.cost_bps_per_side), None
     except NotEnoughBars as error:
