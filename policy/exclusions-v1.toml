@@ -1,0 +1,131 @@
+# Exclusion list v1 — Stablecoins and Wrapped Assets, by stated design intent.
+#
+# ADR-0006 is the decision this file implements: an asset is classified by the
+# design intent it published on day one, and excluded for the whole sample. UST
+# is here for every date it traded, including after May 2022, because its intent
+# to hold a peg was knowable at listing and its depeg is not.
+#
+# Nothing here carries a date of its own. The date a symbol is classified on is
+# its first tradeable date in the point-in-time Universe, read from archive
+# coverage rather than typed in — so a classification cannot be applied earlier
+# than the asset existed, and a listing that appears after `as_of` is reported
+# as unclassified instead of being quietly judged by a list that never saw it.
+#
+# Deliberately absent: PAXG. Its peg is to a troy ounce of gold, not to a
+# currency, so it has a real price series rather than a flat one. It is a
+# commodity token in the cross-section, and excluding it needs its own argument.
+
+version = "v1"
+as_of = "2026-08-31"
+
+[[entry]]
+symbol = "USDCUSDT"
+base_asset = "USDC"
+category = "stablecoin"
+design_intent = "Circle: a fully reserved dollar digital currency, redeemable one-for-one."
+source = "https://www.circle.com/usdc"
+
+[[entry]]
+symbol = "BUSDUSDT"
+base_asset = "BUSD"
+category = "stablecoin"
+design_intent = "Paxos-issued dollar stablecoin, one-for-one against reserves held in trust."
+source = "https://paxos.com/busd/"
+
+[[entry]]
+symbol = "FDUSDUSDT"
+base_asset = "FDUSD"
+category = "stablecoin"
+design_intent = "First Digital USD: one-for-one against US dollar reserves."
+source = "https://firstdigitallabs.com/fdusd"
+
+[[entry]]
+symbol = "TUSDUSDT"
+base_asset = "TUSD"
+category = "stablecoin"
+design_intent = "TrueUSD: a dollar-pegged token against attested reserves."
+source = "https://tusd.io"
+
+[[entry]]
+symbol = "USDPUSDT"
+base_asset = "USDP"
+category = "stablecoin"
+design_intent = "Pax Dollar, formerly Paxos Standard: a regulated dollar-pegged token."
+source = "https://paxos.com/usdp/"
+
+[[entry]]
+symbol = "DAIUSDT"
+base_asset = "DAI"
+category = "stablecoin"
+design_intent = "MakerDAO: a collateral-backed token soft-pegged to the US dollar."
+source = "https://makerdao.com/en/whitepaper"
+
+[[entry]]
+symbol = "USTUSDT"
+base_asset = "UST"
+category = "stablecoin"
+design_intent = "TerraUSD: an algorithmic token whose mint-and-burn mechanism targets a one-dollar peg."
+source = "https://docs.terra.money/docs/learn/protocol.html"
+
+[[entry]]
+symbol = "USTCUSDT"
+base_asset = "USTC"
+category = "stablecoin"
+design_intent = "TerraClassicUSD: the renamed UST. Same asset, same stated peg, same exclusion."
+source = "https://docs.terra.money/docs/learn/protocol.html"
+
+[[entry]]
+symbol = "USDSUSDT"
+base_asset = "USDS"
+category = "stablecoin"
+design_intent = "Stably USDS: a dollar-collateralised token redeemable one-for-one."
+source = "https://stably.io"
+
+[[entry]]
+symbol = "EURUSDT"
+base_asset = "EUR"
+category = "stablecoin"
+design_intent = "The euro itself, quoted against USDT. A currency pair, holding a currency's own value by construction."
+source = "https://www.binance.com/en/support/faq"
+
+[[entry]]
+symbol = "EURIUSDT"
+base_asset = "EURI"
+category = "stablecoin"
+design_intent = "Eurite: a euro-pegged token against one-for-one reserves."
+source = "https://www.eurite.com"
+
+[[entry]]
+symbol = "AEURUSDT"
+base_asset = "AEUR"
+category = "stablecoin"
+design_intent = "Anchored Coins AEUR: a euro-pegged token against one-for-one reserves."
+source = "https://www.anchoredcoins.com"
+
+[[entry]]
+symbol = "WBTCUSDT"
+base_asset = "WBTC"
+category = "wrapped_asset"
+design_intent = "Wrapped Bitcoin: an ERC-20 token backed one-for-one by custodied BTC."
+source = "https://wbtc.network"
+
+[[entry]]
+symbol = "WBETHUSDT"
+base_asset = "WBETH"
+category = "wrapped_asset"
+design_intent = "Wrapped Beacon ETH: a liquid-staking receipt for ETH staked through Binance."
+source = "https://www.binance.com/en/wbeth"
+
+[[entry]]
+symbol = "BETHUSDT"
+base_asset = "BETH"
+category = "wrapped_asset"
+design_intent = "Beacon ETH: a one-for-one claim on ETH staked through Binance."
+source = "https://www.binance.com/en/eth2"
+
+[[entry]]
+symbol = "WNXMUSDT"
+base_asset = "WNXM"
+category = "wrapped_asset"
+design_intent = "Wrapped NXM: a transferable one-for-one wrapper around Nexus Mutual's NXM."
+source = "https://nexusmutual.io"
