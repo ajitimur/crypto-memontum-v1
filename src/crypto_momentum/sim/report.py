@@ -25,7 +25,7 @@ FLAT_PATH_VOL = 1e-12
 
 # How a holding period ended.
 WINDOW_END = "window_end"
-STOPPED_TRADING = "stopped_trading"
+HALTED = "halted"
 LIQUIDATED = "liquidated"
 
 
@@ -43,7 +43,7 @@ class RunResult:
     the two fields named `gross`.
 
     `exit_reason` says why the series ends where it does: the window ran out, the
-    asset stopped trading, or the run was liquidated. On a liquidation the series
+    asset halted, or the run was liquidated. On a liquidation the series
     ends at `liquidation_ts_utc` and nothing after it exists to report; the two
     `gross` fields then describe the *asset's* path, not a position that survived
     to earn it, and Cost Drag is `None` because the comparison it measures — the

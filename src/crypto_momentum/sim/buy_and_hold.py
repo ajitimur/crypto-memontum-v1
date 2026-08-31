@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import pandas as pd
 
-from crypto_momentum.sim.marking import mark_daily, stops_trading_at
+from crypto_momentum.sim.marking import halted_at, mark_daily
 from crypto_momentum.sim.report import (
-    STOPPED_TRADING,
+    HALTED,
     WINDOW_END,
     RunResult,
     summarise,
@@ -39,7 +39,7 @@ def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> Ru
     open, so no information from the Decision Bar's own session is used.
 
     Every day held is marked, per ADR-0001, and the hold ends early if the asset
-    stops trading: the exit is then its last tradeable price, not a later print
+    halts: the exit is then its last tradeable price, not a later print
     nobody could have sold into.
 
     `cost_bps_per_side` is charged on the buy and again on the sell, per ADR-0007.
@@ -49,8 +49,8 @@ def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> Ru
             f"need a Decision Bar plus at least one bar to fill on, got {len(bars)}"
         )
 
-    held = _tradeable_hold(bars.iloc[1:])
-    exit_reason = WINDOW_END if len(held) == len(bars) - 1 else STOPPED_TRADING
+    held = _hold_before_halt(bars.iloc[1:])
+    exit_reason = WINDOW_END if len(held) == len(bars) - 1 else HALTED
     cost = cost_bps_per_side * BPS
     entry_price = float(held["open"].iloc[0])
     if not entry_price > 0.0:
@@ -80,15 +80,15 @@ def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> Ru
     )
 
 
-def _tradeable_hold(held: pd.DataFrame) -> pd.DataFrame:
-    """The held bars up to, but not including, the bar the asset stopped trading on."""
-    halt_ts = stops_trading_at(held)
+def _hold_before_halt(held: pd.DataFrame) -> pd.DataFrame:
+    """The held bars up to, but not including, the bar the asset halted on."""
+    halt_ts = halted_at(held)
     if halt_ts is None:
         return held
     tradeable = held.loc[held.index < halt_ts]
     if tradeable.empty:
         raise NotEnoughBars(
-            f"the asset stopped trading at {halt_ts.date()}, the first bar after the "
+            f"the asset halted at {halt_ts.date()}, the first bar after the "
             "Decision Bar, so the position has no price to fill at"
         )
     return tradeable

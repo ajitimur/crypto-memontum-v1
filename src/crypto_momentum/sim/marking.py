@@ -6,8 +6,8 @@ inside the holding period that a boundary-to-boundary return cannot show:
 
 - A **Liquidation** — cumulative loss breaching 100%. It is terminal. Positions
   close, the series ends at the breach, and no later gain restores it.
-- A halt — an asset that stops trading mid-holding-period. It exits at its last
-  tradeable price rather than at a price nobody could have sold into.
+- A **Halt** — a bar the asset could not have been traded on. The position exits
+  at its last tradeable price, not at one nobody could have sold into.
 
 Under v1's long-only unlevered spot (ADR-0004) the Liquidation trigger is inert:
 a spot holding cannot lose more than it cost. It is built and tested anyway,
@@ -80,15 +80,15 @@ def mark_daily(
     return MarkedPath(equity_net=equity, liquidation_ts_utc=None)
 
 
-def stops_trading_at(bars: pd.DataFrame) -> pd.Timestamp | None:
+def halted_at(bars: pd.DataFrame) -> pd.Timestamp | None:
     """The first bar `bars`' asset could not have been traded on, or `None`.
 
-    A bar with no volume or no price is a bar no order could have filled at — a
-    delisting, a depeg unwind, or a venue pulling the pair. The position exits at
-    the last tradeable price before it, so a resumption afterwards is deliberately
-    ignored: waiting for one means knowing in advance that it comes.
+    A bar with no volume or no price is a bar no order could have filled at: the
+    venue pulled the pair, the asset unwound, or trading simply ceased. The exit
+    is the last tradeable price before the Halt, so a resumption afterwards is
+    deliberately ignored — waiting for one means knowing in advance it comes.
 
-    A price of zero printed on real volume is not a halt. It is the asset trading
+    A price of zero printed on real volume is not a Halt. It is the asset trading
     at nothing, which is the one path by which v1's long-only spot holding reaches
     a 100% loss; it is left in the series so the mark can liquidate on it rather
     than being booked as an exit at the last price that happened to be positive.

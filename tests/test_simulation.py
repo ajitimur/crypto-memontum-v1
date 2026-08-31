@@ -8,7 +8,7 @@ import pytest
 
 import crypto_momentum.sim as sim_package
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars, simulate_buy_and_hold
-from crypto_momentum.sim.report import LIQUIDATED, STOPPED_TRADING, WINDOW_END
+from crypto_momentum.sim.report import HALTED, LIQUIDATED, WINDOW_END
 
 
 def bars_from(rows) -> pd.DataFrame:
@@ -163,21 +163,21 @@ def test_a_run_that_reaches_the_end_of_its_window_says_so_and_is_not_liquidated(
     assert result.liquidation_ts_utc is None
 
 
-def test_an_asset_that_stops_trading_mid_hold_exits_at_its_last_tradeable_price():
-    """The survivorship edge: a delisting is an exit, not a hold through a frozen price."""
+def test_an_asset_that_halts_mid_hold_exits_at_its_last_tradeable_price():
+    """The survivorship edge: a Halt is an exit, not a hold through a frozen price."""
     bars = bars_with_volume(
         [
             (100.0, 100.0, 7.0),  # decision bar
             (100.0, 110.0, 7.0),
             (110.0, 121.0, 7.0),
-            (121.0, 121.0, 0.0),  # delisted: the price prints, nothing trades
+            (121.0, 121.0, 0.0),  # halted: the price prints, nothing trades
             (121.0, 500.0, 0.0),
         ]
     )
 
     result = simulate_buy_and_hold(bars, cost_bps_per_side=0.0)
 
-    assert result.exit_reason == STOPPED_TRADING
+    assert result.exit_reason == HALTED
     assert result.exit_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
     assert result.exit_price == pytest.approx(121.0)
     assert result.n_marks == 2
@@ -223,6 +223,33 @@ def test_an_asset_that_trades_to_zero_liquidates_the_run_on_the_day_it_does():
     assert result.equity_net.iloc[-1] == 0.0
 
 
+def test_the_simulator_liquidates_on_the_daily_path_though_its_boundary_return_does_not():
+    """ADR-0001's fixture, driven through the strategy rather than the mark alone.
+
+    The asset trades to nothing mid-window and prints again after. A simulator
+    that took the window's boundary return would book -50% and carry on; the
+    daily path reaches zero on the way and the run ends there.
+    """
+    bars = bars_with_volume(
+        [
+            (100.0, 100.0, 7.0),  # decision bar
+            (100.0, 80.0, 7.0),
+            (80.0, 0.0, 7.0),  # traded at nothing
+            (0.0, 50.0, 7.0),  # and priced again afterwards
+        ]
+    )
+    boundary_return = 50.0 / 100.0 - 1.0
+    assert boundary_return == pytest.approx(-0.50)
+
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=0.0)
+
+    assert result.liquidated
+    assert result.liquidation_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
+    assert result.exit_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
+    assert result.n_marks == 2
+    assert result.net_return == pytest.approx(-1.0)
+
+
 def test_a_liquidated_run_does_not_report_its_wipeout_as_cost_drag():
     """Cost Drag is the gap between a run and the same run without costs. Once the
     position is gone there is no such run to compare against."""
@@ -240,14 +267,14 @@ def test_a_liquidated_run_does_not_report_its_wipeout_as_cost_drag():
     assert result.cost_drag_as_fraction_of_gross is None
 
 
-def test_an_asset_that_stops_trading_before_the_fill_has_nowhere_to_fill():
+def test_an_asset_that_halts_before_the_fill_has_nowhere_to_fill():
     bars = bars_with_volume([(100.0, 100.0, 7.0), (100.0, 110.0, 0.0)])
 
     with pytest.raises(NotEnoughBars):
         simulate_buy_and_hold(bars, cost_bps_per_side=0.0)
 
 
-def test_the_exit_cost_is_still_charged_when_the_asset_stops_trading():
+def test_the_exit_cost_is_still_charged_when_the_asset_halts():
     """The position is sold at the last tradeable price, and selling costs."""
     bars = bars_with_volume(
         [

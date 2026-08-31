@@ -8,7 +8,7 @@ paths that make it reachable, which is what the trigger exists for.
 import pandas as pd
 import pytest
 
-from crypto_momentum.sim.marking import NothingToMark, mark_daily, stops_trading_at
+from crypto_momentum.sim.marking import NothingToMark, mark_daily, halted_at
 
 
 def marks(returns) -> pd.Series:
@@ -142,21 +142,21 @@ def bars_from(rows) -> pd.DataFrame:
     )
 
 
-def test_an_asset_trading_through_the_window_never_stops():
-    assert stops_trading_at(bars_from([(100.0, 5.0), (110.0, 5.0)])) is None
+def test_an_asset_trading_through_the_window_never_halts():
+    assert halted_at(bars_from([(100.0, 5.0), (110.0, 5.0)])) is None
 
 
-def test_an_asset_whose_bars_stop_printing_a_trade_stops_at_the_first_empty_bar():
+def test_an_asset_whose_bars_stop_printing_a_trade_halts_at_the_first_empty_bar():
     """A bar with no volume is a bar at which the asset could not have been sold."""
     bars = bars_from([(100.0, 5.0), (110.0, 5.0), (110.0, 0.0), (110.0, 0.0)])
 
-    assert stops_trading_at(bars) == pd.Timestamp("2021-07-07T00:00:00Z")
+    assert halted_at(bars) == pd.Timestamp("2021-07-07T00:00:00Z")
 
 
-def test_an_asset_whose_price_goes_missing_stops_there():
+def test_an_asset_whose_price_goes_missing_halts_there():
     bars = bars_from([(100.0, 5.0), (float("nan"), 5.0)])
 
-    assert stops_trading_at(bars) == pd.Timestamp("2021-07-06T00:00:00Z")
+    assert halted_at(bars) == pd.Timestamp("2021-07-06T00:00:00Z")
 
 
 def test_a_price_of_zero_printed_on_real_volume_is_a_trade_and_not_a_halt():
@@ -164,18 +164,18 @@ def test_a_price_of_zero_printed_on_real_volume_is_a_trade_and_not_a_halt():
     on, not an exit at the last price that happened to be positive."""
     bars = bars_from([(100.0, 5.0), (0.0, 5.0)])
 
-    assert stops_trading_at(bars) is None
+    assert halted_at(bars) is None
 
 
 def test_a_price_of_zero_with_nothing_trading_is_a_halt():
     bars = bars_from([(100.0, 5.0), (0.0, 0.0)])
 
-    assert stops_trading_at(bars) == pd.Timestamp("2021-07-06T00:00:00Z")
+    assert halted_at(bars) == pd.Timestamp("2021-07-06T00:00:00Z")
 
 
-def test_an_asset_that_halts_and_then_prints_again_stops_at_the_halt():
+def test_an_asset_that_halts_and_then_prints_again_exits_at_the_halt():
     """The exit is the last tradeable price, not a resumption we could not have
     waited for without knowing in advance that it would come."""
     bars = bars_from([(100.0, 5.0), (110.0, 0.0), (120.0, 5.0)])
 
-    assert stops_trading_at(bars) == pd.Timestamp("2021-07-06T00:00:00Z")
+    assert halted_at(bars) == pd.Timestamp("2021-07-06T00:00:00Z")
