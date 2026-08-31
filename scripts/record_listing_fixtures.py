@@ -25,10 +25,13 @@ from pathlib import Path
 
 sys.path.insert(0, "src")
 
-from crypto_momentum.data.archive_listing import listing_url, parse_listing_page
+from crypto_momentum.data.archive_listing import (
+    KLINES_PREFIX,
+    listing_url,
+    parse_listing_page,
+)
 
 OUT = Path("tests/fixtures/binance/listing")
-KLINES_PREFIX = "data/spot/monthly/klines"
 # Small enough that the recorded SR listing spans three real pages.
 ENUMERATION_MAX_KEYS = 2
 
@@ -56,7 +59,7 @@ def main() -> None:
     for page_number in range(1, 9):
         page = record(
             f"klines-SR-page{page_number}.xml",
-            f"{KLINES_PREFIX}/SR",
+            f"{KLINES_PREFIX}SR",
             marker=marker,
             max_keys=ENUMERATION_MAX_KEYS,
         )
@@ -64,8 +67,8 @@ def main() -> None:
             break
         marker = page.next_marker
 
-    record("SRMUSDT-1d.xml", f"{KLINES_PREFIX}/SRMUSDT/1d/")
-    record("BTCUSDT-1d.xml", f"{KLINES_PREFIX}/BTCUSDT/1d/")
+    record("SRMUSDT-1d.xml", f"{KLINES_PREFIX}SRMUSDT/1d/")
+    record("BTCUSDT-1d.xml", f"{KLINES_PREFIX}BTCUSDT/1d/")
 
 
 if __name__ == "__main__":

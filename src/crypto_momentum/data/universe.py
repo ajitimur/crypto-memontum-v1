@@ -11,10 +11,18 @@ What is deliberately *not* used: `exchangeInfo`, and Binance's own
 today, which is survivorship-biased and (per ADR-0008) documented nowhere in
 Binance's README.
 
-Coverage granularity is the monthly archive partition, because that is what the
-listing publishes. A symbol delisted mid-month has a partial final partition, so
-the panel would otherwise call it tradeable for a few days past its last bar;
-`bar_span_by_symbol` narrows both ends to real bars once they have been built.
+Coverage granularity is the monthly archive partition, because that is all the
+listing publishes. Both ends of a symbol's life therefore over-claim by up to a
+partial month: a symbol listed on the 11th has a partition covering that whole
+month, as does one delisted on the 28th. Pass `bar_span_by_symbol` — built with
+`bar_span_from_bars` once the months are downloaded — to narrow a symbol to its
+real bars. Whether that happened is in the panel metadata rather than assumed,
+because an un-narrowed panel can select an asset a few days before it traded.
+
+This panel is what *existed*, not what we would consider holding: Stablecoins,
+Wrapped Assets and the liquidity floor are policy and belong to issue #12,
+which layers them on top. A caller must not mistake this for a Universe that
+has been through those exclusions.
 
 Nothing here fetches a data file. Listing pages carry no published checksum —
 they are bucket metadata, not data — but a month is only counted as coverage
@@ -29,6 +37,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
+import numpy as np
 import pandas as pd
 
 from crypto_momentum.data.archive_listing import (
@@ -82,8 +91,12 @@ class SymbolCoverage:
 
     @property
     def first_covered_date(self) -> pd.Timestamp:
-        """The earliest date this symbol can be tradeable on, floor included."""
-        return max(_month_start(self.first_month), ARCHIVE_FLOOR)
+        """The first date the opening partition can carry a bar for.
+
+        Coverage only — the archive floor is applied by `build_universe_panel`,
+        which owns it, so there is one place a floor can be changed.
+        """
+        return _month_start(self.first_month)
 
     @property
     def last_covered_date(self) -> pd.Timestamp:
@@ -230,21 +243,21 @@ def build_universe_panel(
     per_symbol_metadata = {}
     for coverage in coverages:
         tradeable = months_of_date.isin(coverage.months) & above_floor
-        last_tradeable = coverage.last_covered_date
         span = spans.get(coverage.symbol)
         if span is not None:
             first_bar, last_bar = (_as_utc(edge) for edge in span)
             tradeable &= (dates >= first_bar.normalize()) & (dates <= last_bar.normalize())
-            last_tradeable = min(last_tradeable, last_bar.normalize())
         flags[coverage.symbol] = tradeable
+        first_flagged, last_flagged = _flagged_edges(dates, tradeable)
         per_symbol_metadata[coverage.symbol] = {
             "first_month": coverage.first_month,
             "last_month": coverage.last_month,
             "n_months": len(coverage.months),
-            "first_tradeable_date_utc": _iso_date(
-                max(coverage.first_covered_date, archive_floor)
-            ),
-            "last_tradeable_date_utc": _iso_date(last_tradeable),
+            # Read off the flags rather than recomputed alongside them, so the
+            # metadata cannot drift from the panel it describes. Both are
+            # clipped to the window, and are None for a symbol the window misses.
+            "first_tradeable_ts_utc": _iso_timestamp(first_flagged),
+            "last_tradeable_ts_utc": _iso_timestamp(last_flagged),
             "narrowed_to_bars": span is not None,
         }
 
@@ -260,16 +273,20 @@ def build_universe_panel(
             "(ADR-0008)"
         ),
         "interval": intervals.pop() if intervals else None,
-        "archive_floor_utc": _iso_date(archive_floor),
-        "start_utc": _iso_date(dates[0]),
-        "end_utc": _iso_date(dates[-1]),
+        "archive_floor_ts_utc": _iso_timestamp(archive_floor),
+        "start_ts_utc": _iso_timestamp(dates[0]),
+        "end_ts_utc": _iso_timestamp(dates[-1]),
         "n_dates": len(dates),
         "n_dates_before_archive_floor": int((~above_floor).sum()),
         "n_symbols": len(coverages),
         "n_symbols_delisted_within_window": sum(
             1
             for entry in per_symbol_metadata.values()
-            if entry["last_tradeable_date_utc"] < _iso_date(dates[-1])
+            if entry["last_tradeable_ts_utc"] is not None
+            and entry["last_tradeable_ts_utc"] < _iso_timestamp(dates[-1])
+        ),
+        "n_symbols_narrowed_to_bars": sum(
+            1 for entry in per_symbol_metadata.values() if entry["narrowed_to_bars"]
         ),
         "coverage_resolution": (
             "monthly archive partition, narrowed to real bars where a bar span "
@@ -279,6 +296,62 @@ def build_universe_panel(
         "symbols": per_symbol_metadata,
     }
     return UniversePanel(tradeable=tradeable, metadata=metadata)
+
+
+def bar_span_from_bars(bars: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """The `(first, last)` bar timestamps of a built bar series.
+
+    The bridge from derived bars back to the panel: what the listing can only
+    say to the month, the bars say to the day.
+    """
+    if bars.empty:
+        raise UniverseError("a bar span needs at least one bar")
+    return bars.index[0], bars.index[-1]
+
+
+def build_archive_universe(
+    *,
+    start: pd.Timestamp | str,
+    end: pd.Timestamp | str,
+    interval: str = "1d",
+    quote_asset: str | None = None,
+    prefix: str = KLINES_PREFIX,
+    search_prefix: str | None = None,
+    open_url: UrlOpener | None = None,
+    max_keys: int = MAX_KEYS_PER_PAGE,
+    archive_floor: pd.Timestamp = ARCHIVE_FLOOR,
+) -> UniversePanel:
+    """Enumerate the archive and build the whole point-in-time Universe from it.
+
+    The composed path: list every symbol the bucket has ever held, read each
+    one's coverage from its own partitions, and turn the lot into a dated
+    tradeable flag. A symbol the archive lists but publishes no verifiable
+    partition for at `interval` is dropped rather than carried as an empty
+    column — it never traded on this interval, so it was never tradeable.
+
+    `prefix` is the klines directory each symbol hangs off. `search_prefix`
+    narrows *which* symbols are enumerated (`.../klines/SR` finds only the SRM
+    pairs) and defaults to enumerating the whole directory; the two are separate
+    because one addresses a symbol and the other filters the list of them.
+
+    One listing request per symbol, so this is a slow call against the live
+    bucket and a cheap one against recorded pages.
+    """
+    coverages = []
+    for symbol in symbols_in_archive(
+        quote_asset=quote_asset,
+        prefix=search_prefix or prefix,
+        open_url=open_url,
+        max_keys=max_keys,
+    ):
+        coverage = coverage_for_symbol(
+            symbol, interval, prefix=prefix, open_url=open_url, max_keys=max_keys
+        )
+        if coverage.months:
+            coverages.append(coverage)
+    return build_universe_panel(
+        coverages, start=start, end=end, archive_floor=archive_floor
+    )
 
 
 def fetch_covered_month(
@@ -333,5 +406,17 @@ def _as_utc(value: pd.Timestamp | str) -> pd.Timestamp:
     return timestamp.tz_convert("UTC")
 
 
-def _iso_date(timestamp: pd.Timestamp) -> str:
+def _flagged_edges(
+    dates: pd.DatetimeIndex, tradeable
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    """The first and last date a symbol is flagged tradeable, or `(None, None)`."""
+    flagged = np.flatnonzero(tradeable)
+    if flagged.size == 0:
+        return None, None
+    return dates[flagged[0]], dates[flagged[-1]]
+
+
+def _iso_timestamp(timestamp: pd.Timestamp | None) -> str | None:
+    if timestamp is None:
+        return None
     return timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")

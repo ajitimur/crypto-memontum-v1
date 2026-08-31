@@ -94,12 +94,12 @@ def parse_listing_page(payload: bytes) -> ListingPage:
         _required_text(element, "Key")
         for element in root.findall(f"{_S3_NAMESPACE}Contents")
     )
+    # Every listing here sets `delimiter=/`, and S3 supplies NextMarker whenever
+    # it does. A truncated page without one is a response we do not understand,
+    # and `walk_listing` refuses it rather than guessing a marker: guessing from
+    # the last key silently skips the CommonPrefixes that sort after it.
     is_truncated = _text(root, "IsTruncated") == "true"
     next_marker = _text(root, "NextMarker") or None
-    if is_truncated and next_marker is None:
-        # S3 omits NextMarker when no delimiter is in play; the last key
-        # returned is then the marker for the next page.
-        next_marker = (keys or prefixes)[-1] if (keys or prefixes) else None
     return ListingPage(
         prefixes=prefixes, keys=keys, is_truncated=is_truncated, next_marker=next_marker
     )

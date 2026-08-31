@@ -5,15 +5,20 @@ the panel tests use hand-built coverage whose expected dates were worked out by
 hand.
 """
 
+from urllib.parse import parse_qs, urlparse
+
 import pandas as pd
 import pytest
 
+from crypto_momentum.data.archive_listing import parse_listing_page
 from crypto_momentum.data.binance_archive import ChecksumMismatch
+from crypto_momentum.data.fetch import ArchiveUnavailable
 from crypto_momentum.data.universe import (
-    ARCHIVE_FLOOR,
     SymbolCoverage,
     SymbolNotCovered,
     UniverseError,
+    bar_span_from_bars,
+    build_archive_universe,
     build_universe_panel,
     coverage_for_symbol,
     coverage_from_keys,
@@ -103,8 +108,9 @@ def test_a_still_trading_symbol_starts_at_the_archive_floor(recorded_listing_pag
     )
 
     assert btc.first_month == "2017-08"
-    # The 2017-08 partition opens on the 17th, not the 1st: the floor, not a hole.
-    assert btc.first_covered_date == ARCHIVE_FLOOR
+    # Coverage is the partition's own span. The 2017-08 partition opens on the
+    # 17th, but that is the archive floor and the panel applies it, not coverage.
+    assert btc.first_covered_date == pd.Timestamp("2017-08-01T00:00:00Z")
 
 
 # --- Coverage is only what we could verify -----------------------------------
@@ -157,12 +163,12 @@ def test_the_archive_floor_is_in_the_metadata_and_in_the_flags():
     )
     btc = panel.tradeable["BTCUSDT"]
 
-    assert panel.metadata["archive_floor_utc"] == "2017-08-17T00:00:00Z"
+    assert panel.metadata["archive_floor_ts_utc"] == "2017-08-17T00:00:00Z"
     # 2017-01-01 through 2017-08-16 inclusive.
     assert panel.metadata["n_dates_before_archive_floor"] == 228
     assert not btc.loc[:"2017-08-16T00:00:00Z"].any()
     assert btc.loc["2017-08-17T00:00:00Z":].all()
-    assert panel.metadata["symbols"]["BTCUSDT"]["first_tradeable_date_utc"] == (
+    assert panel.metadata["symbols"]["BTCUSDT"]["first_tradeable_ts_utc"] == (
         "2017-08-17T00:00:00Z"
     )
 
@@ -199,7 +205,7 @@ def test_a_supplied_bar_span_narrows_a_mid_month_delisting_to_its_last_bar():
     assert srm.loc["2022-11-28T00:00:00Z"]
     assert not srm.loc["2022-11-29T00:00:00Z"]
     assert not srm.loc["2022-11-30T00:00:00Z"]
-    assert panel.metadata["symbols"]["SRMUSDT"]["last_tradeable_date_utc"] == (
+    assert panel.metadata["symbols"]["SRMUSDT"]["last_tradeable_ts_utc"] == (
         "2022-11-28T00:00:00Z"
     )
     assert panel.metadata["symbols"]["SRMUSDT"]["narrowed_to_bars"]
@@ -300,3 +306,96 @@ def test_a_month_outside_coverage_is_refused_before_any_download():
 
     with pytest.raises(SymbolNotCovered, match="2022-12"):
         fetch_covered_month(srm, "2022-12", open_url=open_url)
+
+
+# --- The composed path -------------------------------------------------------
+
+
+def archive_opener(recorded_listing_page):
+    """Serve the whole recorded archive: SR enumeration, then SRMUSDT's partitions.
+
+    Keyed on `(prefix, marker)` rather than the full URL, because the composed
+    build pages enumeration and partitions with one page size and the two
+    fixtures were recorded with different ones.
+    """
+    served = {}
+    marker = None
+    for name in SR_PAGES:
+        payload = recorded_listing_page(name)
+        served[(SR_PREFIX, marker)] = payload
+        marker = parse_listing_page(payload).next_marker
+    served[(f"{KLINES}/SRMUSDT/1d/", None)] = recorded_listing_page("SRMUSDT-1d.xml")
+
+    def open_url(url: str) -> bytes:
+        query = parse_qs(urlparse(url).query)
+        key = (query["prefix"][0], query.get("marker", [None])[0])
+        if key not in served:
+            raise ArchiveUnavailable(f"no recorded page for {key}")
+        return served[key]
+
+    return open_url
+
+
+def test_the_whole_universe_is_built_from_the_bucket_in_one_call(recorded_listing_page):
+    """Enumerate, gather coverage per symbol, and emit one panel."""
+    panel = build_archive_universe(
+        start="2022-10-01",
+        end="2023-01-31",
+        quote_asset="USDT",
+        prefix=f"{KLINES}/",
+        search_prefix=SR_PREFIX,
+        open_url=archive_opener(recorded_listing_page),
+        max_keys=SR_MAX_KEYS,
+    )
+
+    assert list(panel.tradeable.columns) == ["SRMUSDT"]
+    assert panel.tradeable_on("2022-11-15") == ("SRMUSDT",)
+    assert panel.tradeable_on("2023-01-15") == ()
+    assert panel.metadata["n_symbols_delisted_within_window"] == 1
+    assert panel.metadata["n_symbols_narrowed_to_bars"] == 0
+
+
+def test_metadata_edges_stay_inside_the_window_they_describe():
+    """Read off the flags, so they cannot name a date the panel does not hold."""
+    panel = build_universe_panel(
+        [coverage("SRMUSDT", months_between("2020-08", "2022-11"))],
+        start="2021-01-01",
+        end="2021-12-31",
+    )
+    srm = panel.metadata["symbols"]["SRMUSDT"]
+
+    assert srm["first_month"] == "2020-08"
+    assert srm["first_tradeable_ts_utc"] == "2021-01-01T00:00:00Z"
+    assert srm["last_tradeable_ts_utc"] == "2021-12-31T00:00:00Z"
+    assert panel.metadata["n_symbols_delisted_within_window"] == 0
+
+
+def test_a_symbol_the_window_misses_entirely_reports_no_tradeable_dates():
+    panel = build_universe_panel(
+        [coverage("SRMUSDT", ["2022-11"])], start="2023-01-01", end="2023-01-31"
+    )
+    srm = panel.metadata["symbols"]["SRMUSDT"]
+
+    assert not panel.tradeable["SRMUSDT"].any()
+    assert srm["first_tradeable_ts_utc"] is None
+    assert srm["last_tradeable_ts_utc"] is None
+
+
+def test_a_bar_span_is_read_off_built_bars():
+    """The bridge from derived bars back to the panel's month-resolution edges."""
+    bars = pd.DataFrame(
+        {"close": [1.0, 2.0, 3.0]},
+        index=pd.DatetimeIndex(
+            ["2022-11-26", "2022-11-27", "2022-11-28"], tz="UTC", name="ts_utc"
+        ),
+    )
+
+    assert bar_span_from_bars(bars) == (
+        pd.Timestamp("2022-11-26T00:00:00Z"),
+        pd.Timestamp("2022-11-28T00:00:00Z"),
+    )
+
+
+def test_a_bar_span_needs_bars():
+    with pytest.raises(UniverseError, match="at least one bar"):
+        bar_span_from_bars(pd.DataFrame())
