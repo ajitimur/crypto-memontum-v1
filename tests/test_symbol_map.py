@@ -19,6 +19,7 @@ from crypto_momentum.data.symbol_map import (
     build_symbol_map,
     load_overrides,
     symbol_spells,
+    vendor_symbol_map,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "coinmarketcap"
@@ -211,3 +212,32 @@ def test_one_id_with_two_symbols_yields_two_spells_that_do_not_overlap(panel):
 
     assert [s.symbol for s in terra] == ["LUNA", "LUNC"]
     assert terra[0].valid_until == terra[1].valid_from
+
+
+# --- the mapping as production actually builds it -------------------------
+
+
+def test_the_venue_rename_date_wins_over_the_vendors_snapshot_grid(panel):
+    """The whole reason the override table exists, asserted end to end.
+
+    CoinMarketCap's snapshot moves id 4172 from LUNA to LUNC on 2022-05-29.
+    Binance renamed on 2022-05-31. Between those two dates a LUNAUSDT bar is
+    still the original chain, so 2022-05-30 has to resolve to 4172 — the
+    derived-only mapping gets this wrong, and that is what is being pinned.
+    """
+    derived_only = build_symbol_map(symbol_spells(panel), BINANCE_BASES)
+    as_used = vendor_symbol_map(panel, BINANCE_BASES, repo_root=REPO_ROOT)
+
+    assert derived_only.cmc_id_for("LUNA", date(2022, 5, 30)) == 20314
+    assert as_used.cmc_id_for("LUNA", date(2022, 5, 30)) == 4172
+    assert as_used.cmc_id_for("LUNA", date(2022, 5, 31)) == 20314
+    assert as_used.cmc_id_for("LUNC", date(2022, 5, 31)) == 4172
+
+
+def test_the_mapping_as_used_still_matches_the_ordinary_assets(panel):
+    as_used = vendor_symbol_map(panel, BINANCE_BASES, repo_root=REPO_ROOT)
+
+    assert as_used.binance_base_for(1, date(2020, 1, 1)) == "BTC"
+    assert as_used.binance_base_for(6187, date(2022, 5, 22)) == "SRM"
+    assert 827 in as_used.unmatched_cmc_ids
+    assert "PEPE" in as_used.unmatched_binance_bases

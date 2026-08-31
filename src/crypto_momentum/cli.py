@@ -17,6 +17,7 @@ from crypto_momentum.data.cmc_panel import (
     PanelAlreadyStored,
     PanelMissing,
     PanelPullFailed,
+    PanelWindowNotCovered,
     SurvivorshipBiasedPanel,
     pull_panel,
 )
@@ -44,6 +45,7 @@ REFUSALS = (
     PanelAlreadyStored,
     PanelMissing,
     PanelPullFailed,
+    PanelWindowNotCovered,
     RawWindowAlreadyStored,
     RawWindowMissing,
     SurvivorshipBiasedPanel,

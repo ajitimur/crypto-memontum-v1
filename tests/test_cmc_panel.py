@@ -16,6 +16,7 @@ from crypto_momentum.data.cmc_panel import (
     CmcPanelStore,
     PanelAlreadyStored,
     PanelMissing,
+    PanelWindowNotCovered,
     SurvivorshipBiasedPanel,
     parse_panel_csv,
     pull_panel,
@@ -23,6 +24,11 @@ from crypto_momentum.data.cmc_panel import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "coinmarketcap"
 PULLED_AT = "2026-08-31T00:00:00Z"
+
+# The fixture is a hand-cut slice, not the real panel, so its pulls ask for the
+# window it actually has. The real pull asks for PANEL_START and is checked
+# against it — see test_a_panel_that_does_not_reach_the_requested_start.
+FIXTURE_START = date(2017, 1, 1)
 
 
 @pytest.fixture
@@ -52,7 +58,12 @@ def _runner(payload: bytes, calls: list[str]):
 def test_the_first_pull_invokes_crypto2_and_stores_the_panel(store, panel_csv):
     calls: list[str] = []
 
-    path = pull_panel(store, run_pull=_runner(panel_csv, calls), pulled_at_utc=PULLED_AT)
+    path = pull_panel(
+        store,
+        run_pull=_runner(panel_csv, calls),
+        pulled_at_utc=PULLED_AT,
+        window_start=FIXTURE_START,
+    )
 
     assert len(calls) == 1
     assert path.read_bytes() == panel_csv
@@ -63,8 +74,15 @@ def test_rebuilding_does_not_re_fetch_the_panel(store, panel_csv):
     calls: list[str] = []
     runner = _runner(panel_csv, calls)
 
-    first = pull_panel(store, run_pull=runner, pulled_at_utc=PULLED_AT)
-    second = pull_panel(store, run_pull=runner, pulled_at_utc="2026-09-30T00:00:00Z")
+    first = pull_panel(
+        store, run_pull=runner, pulled_at_utc=PULLED_AT, window_start=FIXTURE_START
+    )
+    second = pull_panel(
+        store,
+        run_pull=runner,
+        pulled_at_utc="2026-09-30T00:00:00Z",
+        window_start=FIXTURE_START,
+    )
 
     assert len(calls) == 1
     assert first == second
@@ -113,9 +131,56 @@ def test_the_manifest_records_what_the_protocol_asks_for(store, panel_csv):
     assert manifest["bar_close_convention"] == "snapshot as of 00:00 UTC on ts_utc"
     assert manifest["timezone"] == "UTC"
     assert manifest["window_start"] == PANEL_START.isoformat()
+    assert manifest["window_end"] == "2026-08-31"
     assert manifest["pulled_at_utc"] == PULLED_AT
-    assert manifest["survivorship_free"] is True
     assert manifest["bytes"] == len(panel_csv)
+
+
+def test_the_manifest_records_the_dead_coins_it_found_not_a_claim_of_freedom(
+    store, panel_csv
+):
+    """`survivorship_free = true` would be an assertion about a file we did not read."""
+    store.write(panel_csv, pulled_at_utc=PULLED_AT)
+
+    assert store.manifest()["dead_assets_present"] == [827, 6187]
+
+
+def test_the_manifest_separates_the_window_asked_for_from_what_came_back(
+    store, panel_csv
+):
+    store.write(panel_csv, pulled_at_utc=PULLED_AT)
+    manifest = store.manifest()
+
+    assert manifest["window_start"] == PANEL_START.isoformat()
+    assert manifest["first_snapshot"] == "2017-01-01"
+    assert manifest["last_snapshot"] == "2023-01-01"
+
+
+def test_a_panel_that_does_not_reach_the_requested_start_is_refused(store, panel_csv):
+    """A short panel stored under a long window would mislead every later reader."""
+
+    def run(destination):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(panel_csv)
+
+    with pytest.raises(PanelWindowNotCovered, match="2013-04-28"):
+        pull_panel(store, run_pull=run, pulled_at_utc=PULLED_AT)
+
+    assert not store.has()
+
+
+def test_a_biased_panel_cannot_be_stored_even_by_writing_it_directly(store):
+    """The check lives in `write`, so no path can put a biased panel on disk."""
+    survivors_only = b"\n".join(
+        line
+        for line in (FIXTURES / "cmc-panel-sample.csv").read_bytes().splitlines()
+        if b",827," not in line and b",6187," not in line
+    )
+
+    with pytest.raises(SurvivorshipBiasedPanel):
+        store.write(survivors_only, pulled_at_utc=PULLED_AT)
+
+    assert not store.has()
 
 
 # --- the panel is survivorship-free --------------------------------------
@@ -148,7 +213,7 @@ def test_a_panel_missing_its_dead_coins_is_rejected_at_pull_time(store):
         destination.write_bytes(survivors_only)
 
     with pytest.raises(SurvivorshipBiasedPanel, match="827"):
-        pull_panel(store, run_pull=run, pulled_at_utc=PULLED_AT)
+        pull_panel(store, run_pull=run, pulled_at_utc=PULLED_AT, window_start=FIXTURE_START)
 
     assert not store.has(), "a biased panel must not reach data/raw/"
 

@@ -16,8 +16,19 @@ returning it.
 
 Most of the mapping derives from the panel itself, because CoinMarketCap records
 the rename: id 4172's symbol changes from LUNA to LUNC across the May 2022
-snapshots, which is exactly the interval boundary we need. `configs/vendor-symbol-map.toml`
-holds the hand-resolved cases where it does not.
+snapshots. But it records it on *its* grid, and the vendor's snapshot date is not
+the venue's cutover date — CoinMarketCap's fixture snapshot lands on 2022-05-29
+where Binance renamed on 2022-05-31. The bar that fills an order is a Binance
+bar, so the venue's date is the one that has to win. That is what
+`configs/vendor-symbol-map.toml` is for, and `vendor_symbol_map` is the entry
+point that applies it; `build_symbol_map` is the pure core underneath.
+
+This module answers identity, not tradeability: "which asset was this base on
+this date". Whether that asset could be traded on that date is the Universe's
+question, and it is answered from the archive's own file date ranges. So a spell
+deliberately spans a gap in listing — an asset relisted under the same symbol is
+still the same asset, and pretending its identity lapsed would be a second bug
+rather than a fix for the first.
 """
 
 from __future__ import annotations
@@ -26,9 +37,13 @@ import tomllib
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 import pandas as pd
+
+
+# The committed hand-resolved links, relative to the repository root.
+DEFAULT_OVERRIDE_TABLE = Path("configs") / "vendor-symbol-map.toml"
 
 
 class AmbiguousTicker(Exception):
@@ -39,8 +54,33 @@ class MalformedOverrideTable(Exception):
     """The committed override table is not readable as vendor links."""
 
 
+class _HalfOpen:
+    """`valid_from` inclusive, `valid_until` exclusive, `None` meaning still open.
+
+    A mixin rather than a base dataclass so that both users keep their own field
+    order — the identity reads first in each, which is how they are constructed.
+    """
+
+    valid_from: date
+    valid_until: date | None
+
+    def covers(self, as_of: date) -> bool:
+        if as_of < self.valid_from:
+            return False
+        return self.valid_until is None or as_of < self.valid_until
+
+    def overlaps(self, other: "_HalfOpen") -> bool:
+        starts_before_other_ends = (
+            other.valid_until is None or self.valid_from < other.valid_until
+        )
+        other_starts_before_this_ends = (
+            self.valid_until is None or other.valid_from < self.valid_until
+        )
+        return starts_before_other_ends and other_starts_before_this_ends
+
+
 @dataclass(frozen=True)
-class SymbolSpell:
+class SymbolSpell(_HalfOpen):
     """A stretch of time over which CoinMarketCap called `cmc_id` by `symbol`.
 
     `valid_from` is inclusive and `valid_until` exclusive, both UTC dates.
@@ -55,7 +95,7 @@ class SymbolSpell:
 
 
 @dataclass(frozen=True)
-class VendorLink:
+class VendorLink(_HalfOpen):
     """`cmc_id` is the asset Binance quoted as `binance_base` over this interval.
 
     Half-open: `valid_from` inclusive, `valid_until` exclusive, `None` for open.
@@ -65,11 +105,6 @@ class VendorLink:
     binance_base: str
     valid_from: date
     valid_until: date | None
-
-    def covers(self, as_of: date) -> bool:
-        if as_of < self.valid_from:
-            return False
-        return self.valid_until is None or as_of < self.valid_until
 
 
 @dataclass(frozen=True)
@@ -151,7 +186,12 @@ def build_symbol_map(
 ) -> SymbolMap:
     """Match CoinMarketCap ids to the Binance bases in `binance_bases`.
 
-    A spell matches when its symbol is a base the archive lists over that spell.
+    A spell matches when its symbol is one of `binance_bases`. The check is on
+    the name only — `binance_bases` carries no dates, so this cannot tell that a
+    base was listed for part of a spell and not the rest. Tradeability is the
+    Universe's question, resolved from the archive's own file date ranges; this
+    function answers identity.
+
     Overrides win outright: naming an id in the override table discards every
     derived link for it, so a hand-resolved asset is described in exactly one
     place rather than merged with a guess.
@@ -183,6 +223,26 @@ def build_symbol_map(
         links=links,
         unmatched_cmc_ids=tuple(sorted(seen_ids - linked_ids)),
         unmatched_binance_bases=tuple(sorted(bases - linked_bases)),
+    )
+
+
+def vendor_symbol_map(
+    panel: pd.DataFrame,
+    binance_bases: Iterable[str],
+    *,
+    repo_root: Path | str = ".",
+    overrides_path: Path | str | None = None,
+) -> SymbolMap:
+    """The mapping as it is actually used: panel spells, corrected by the table.
+
+    This is the entry point production code should call. Going through
+    `build_symbol_map` alone silently accepts the vendor's snapshot grid as the
+    boundary between two assets sharing a ticker, and for LUNA that grid is two
+    days out from Binance's own rename.
+    """
+    path = Path(overrides_path) if overrides_path else Path(repo_root) / DEFAULT_OVERRIDE_TABLE
+    return build_symbol_map(
+        symbol_spells(panel), binance_bases, overrides=load_overrides(path)
     )
 
 
@@ -224,14 +284,19 @@ def _as_date(value: object) -> date:
     raise TypeError(f"{value!r} is not a date; write it bare, as 2022-05-31")
 
 
-def _assert_no_overlap(links: Sequence[VendorLink], *, key, subject: str) -> None:
+def _assert_no_overlap(
+    links: Sequence[VendorLink],
+    *,
+    key: Callable[[VendorLink], object],
+    subject: str,
+) -> None:
     grouped: dict[object, list[VendorLink]] = {}
     for link in links:
         grouped.setdefault(key(link), []).append(link)
     for identity, group in grouped.items():
         ordered = sorted(group, key=lambda link: link.valid_from)
         for earlier, later in zip(ordered, ordered[1:]):
-            if earlier.valid_until is None or later.valid_from < earlier.valid_until:
+            if earlier.overlaps(later):
                 raise AmbiguousTicker(
                     f"{subject} {identity} is claimed by both "
                     f"{_describe(earlier)} and {_describe(later)}, which overlap. "

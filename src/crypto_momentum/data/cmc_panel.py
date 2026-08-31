@@ -99,6 +99,10 @@ class PanelPullFailed(Exception):
     """`Rscript` did not produce a panel."""
 
 
+class PanelWindowNotCovered(Exception):
+    """The panel does not reach back as far as the window that was asked for."""
+
+
 PanelPuller = Callable[[Path], None]
 
 
@@ -108,19 +112,32 @@ class CmcPanelStore:
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
 
-    def path_for(self) -> Path:
+    def panel_path(self) -> Path:
         return self.root / _PARTITION / _FILENAME
 
     def has(self) -> bool:
-        return self.path_for().exists()
+        return self.panel_path().exists()
 
-    def write(self, payload: bytes, *, pulled_at_utc: str) -> Path:
-        """Store the panel. Raises if it is already stored.
+    def write(
+        self,
+        payload: bytes,
+        *,
+        pulled_at_utc: str,
+        window_start: date = PANEL_START,
+        window_end: date | None = None,
+    ) -> Path:
+        """Store the panel. Raises if it is already stored, or if it is biased.
 
         `pulled_at_utc` is passed in rather than read from the clock, so the
-        stored manifest is reproducible.
+        stored manifest is reproducible. The survivorship check runs here rather
+        than only in `pull_panel`, so no path can put a biased panel on disk.
+
+        The manifest separates what was *asked for* (`window_start`,
+        `window_end`) from what actually came back (`first_snapshot`,
+        `last_snapshot`, `dead_assets_present`). Recording only the request
+        would let a short panel be stamped with a window it does not cover.
         """
-        path = self.path_for()
+        path = self.panel_path()
         if path.exists():
             raise PanelAlreadyStored(
                 f"{_FILENAME} is already in {path.parent}. Per ADR-0008 the "
@@ -128,6 +145,8 @@ class CmcPanelStore:
                 "report, not an overwrite."
             )
         observed = parse_panel_csv(payload)
+        assert_survivorship_free(observed)
+        listed = set(observed["cmc_id"].unique())
         return write_immutable(
             path,
             payload,
@@ -138,11 +157,18 @@ class CmcPanelStore:
                 "bar_close_convention": BAR_CLOSE_CONVENTION,
                 "timezone": TIMEZONE,
                 "interval": PANEL_INTERVAL,
-                "window_start": PANEL_START.isoformat(),
+                "window_start": window_start.isoformat(),
+                "window_end": (
+                    window_end or date.fromisoformat(pulled_at_utc[:10])
+                ).isoformat(),
                 "first_snapshot": observed.index.min().date().isoformat(),
                 "last_snapshot": observed.index.max().date().isoformat(),
                 "assets": int(observed["cmc_id"].nunique()),
-                "survivorship_free": True,
+                # Evidence, not a claim: the ids of assets known to have died
+                # that this payload actually lists.
+                "dead_assets_present": sorted(
+                    cmc_id for cmc_id in KNOWN_DEAD_ASSETS if cmc_id in listed
+                ),
                 "sha256": sha256_of(payload),
                 "pulled_at_utc": pulled_at_utc,
                 "bytes": len(payload),
@@ -150,7 +176,7 @@ class CmcPanelStore:
         )
 
     def read(self) -> bytes:
-        path = self.path_for()
+        path = self.panel_path()
         if not path.exists():
             raise PanelMissing(
                 f"the CoinMarketCap panel has not been pulled into {path.parent}; "
@@ -160,8 +186,8 @@ class CmcPanelStore:
 
     def manifest(self) -> dict[str, Any]:
         if not self.has():
-            raise PanelMissing(f"no panel in {self.path_for().parent}")
-        return read_manifest(self.path_for())
+            raise PanelMissing(f"no panel in {self.panel_path().parent}")
+        return read_manifest(self.panel_path())
 
     def read_panel(self) -> pd.DataFrame:
         """The stored panel as a frame. One row is one asset on one snapshot date."""
@@ -174,17 +200,24 @@ def pull_panel(
     run_pull: PanelPuller | None = None,
     pulled_at_utc: str,
     repo_root: Path | str = ".",
+    window_start: date = PANEL_START,
 ) -> Path:
     """Return the stored panel, pulling it through `crypto2` only if absent.
 
     The early return is the whole point: re-running a build must not re-fetch.
-    A panel that fails its survivorship check never reaches `data/raw/`, so a
-    bad pull leaves the store empty and can simply be run again.
+    A panel that fails its checks never reaches `data/raw/`, so a bad pull
+    leaves the store empty and can simply be run again.
+
+    The window's end is taken from `pulled_at_utc` rather than read from the
+    clock, so the same call reproduces the same request.
     """
     if store.has():
-        return store.path_for()
+        return store.panel_path()
 
-    puller = run_pull or rscript_puller(Path(repo_root) / _R_SCRIPT)
+    window_end = date.fromisoformat(pulled_at_utc[:10])
+    puller = run_pull or rscript_puller(
+        Path(repo_root) / _R_SCRIPT, window_start=window_start, window_end=window_end
+    )
     with tempfile.TemporaryDirectory() as staging:
         destination = Path(staging) / _FILENAME
         puller(destination)
@@ -192,17 +225,27 @@ def pull_panel(
             raise PanelPullFailed(f"the pull produced no file at {destination}")
         payload = destination.read_bytes()
 
-    assert_survivorship_free(parse_panel_csv(payload))
-    return store.write(payload, pulled_at_utc=pulled_at_utc)
+    assert_covers_window(parse_panel_csv(payload), window_start)
+    return store.write(
+        payload,
+        pulled_at_utc=pulled_at_utc,
+        window_start=window_start,
+        window_end=window_end,
+    )
 
 
 def rscript_puller(
     script: Path,
     *,
-    window_start: date = PANEL_START,
+    window_start: date,
+    window_end: date,
     interval: str = PANEL_INTERVAL,
 ) -> PanelPuller:
-    """Build the puller that shells out to `Rscript`, the one R boundary we cross."""
+    """Build the puller that shells out to `Rscript`, the one R boundary we cross.
+
+    Both window bounds are required. The R script will not read the clock for
+    itself, so an unrepeatable window cannot be requested by accident.
+    """
 
     def run(destination: Path) -> None:
         command = [
@@ -210,6 +253,8 @@ def rscript_puller(
             str(script),
             "--start",
             window_start.isoformat(),
+            "--end",
+            window_end.isoformat(),
             "--interval",
             interval,
             "--out",
@@ -273,6 +318,21 @@ def parse_panel_csv(payload: bytes) -> pd.DataFrame:
             "one row must be one asset on one date"
         )
     return panel
+
+
+def assert_covers_window(panel: pd.DataFrame, window_start: date) -> None:
+    """Raise unless the panel reaches back to `window_start`.
+
+    A pull that quietly returns a shorter history would otherwise be stored with
+    a manifest naming a window it does not have, and every later reader would
+    trust the manifest.
+    """
+    first_snapshot = panel.index.min().date()
+    if first_snapshot > window_start:
+        raise PanelWindowNotCovered(
+            f"the panel starts at {first_snapshot}, later than the requested "
+            f"{window_start}. Storing it would stamp a window it does not cover."
+        )
 
 
 def assert_survivorship_free(panel: pd.DataFrame) -> None:

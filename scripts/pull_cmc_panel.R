@@ -13,8 +13,12 @@
 # either: the endpoints are undocumented, the route breaches CoinMarketCap's
 # terms, and the practical exposure is an IP ban.
 #
-#   Rscript scripts/pull_cmc_panel.R --start 2013-04-28 --interval 7d \
-#       --out data/raw/coinmarketcap/cmc-listings-historical.csv
+#   Rscript scripts/pull_cmc_panel.R --start 2013-04-28 --end 2026-08-31 \
+#       --interval 7d --out data/raw/coinmarketcap/cmc-listings-historical.csv
+#
+# --end is required and has no default. Reading the clock here would make the
+# window unpinnable and the pull unrepeatable; the caller passes the date it
+# already stamped the manifest with.
 #
 # Needs: install.packages("crypto2")
 
@@ -32,6 +36,7 @@ PANEL_COLUMNS <- c(
 parse_args <- function(argv) {
   defaults <- list(
     start = "2013-04-28",
+    end = NA_character_,
     interval = "7d",
     out = "data/raw/coinmarketcap/cmc-listings-historical.csv"
   )
@@ -43,6 +48,13 @@ parse_args <- function(argv) {
     }
     defaults[[key]] <- argv[[index + 1]]
     index <- index + 2
+  }
+  if (is.na(defaults$end)) {
+    stop(
+      "--end is required: the window has to be pinned for the pull to be ",
+      "repeatable, so this script will not read the clock for you.",
+      call. = FALSE
+    )
   }
   defaults
 }
@@ -66,11 +78,11 @@ first_present <- function(frame, candidates, what) {
 main <- function() {
   args <- parse_args(commandArgs(trailingOnly = TRUE))
   start_date <- format(as.Date(args$start), "%Y%m%d")
-  end_date <- format(Sys.Date(), "%Y%m%d")
+  end_date <- format(as.Date(args$end), "%Y%m%d")
 
   message(
-    "pulling CoinMarketCap historical listings ", args$start,
-    " onward at ", args$interval, " — this is the one-time pull"
+    "pulling CoinMarketCap historical listings ", args$start, " to ", args$end,
+    " at ", args$interval, " — this is the one-time pull"
   )
   listings <- crypto2::crypto_listings(
     which = "historical",

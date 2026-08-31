@@ -32,7 +32,7 @@ uv run momentum trials                                              # every conf
 | `results/` | One JSON result per `(commit, config)`. Gitignored. |
 | `trials.jsonl` | Every run ever made, appended, git-tracked. The count of configurations tried that every reported result has to quote. |
 | `configs/` | Run configs and `vendor-symbol-map.toml`. Inert TOML — the loader validates and cannot execute. |
-| `scripts/pull_cmc_panel.R` | The one-time `crypto2` pull. Needs R; run once, never again. |
+| `scripts/pull_cmc_panel.R` | The one-time `crypto2` pull. Needs R; run once, never again. Both window bounds are required — it will not read the clock. |
 | `src/crypto_momentum/sim/` | The simulation core. No network, no filesystem, no clock; a test asserts it. |
 
 ## Data source
@@ -63,7 +63,11 @@ bug surface. It is time-varying by construction: a CoinMarketCap id is
 permanent, a Binance base is a name Binance reuses. Binance reassigned
 `LUNAUSDT` to Terra 2.0 on 2022-05-31 while the original chain became `LUNC`, so
 there is no answer to "what is LUNA" — only to "what was LUNA on this date".
-`build_symbol_map` derives most links from the panel's own renames and refuses
-to build a mapping where one base means two assets on one day; the hand-resolved
-cases live in `configs/vendor-symbol-map.toml`. Assets on one vendor and not the
-other are reported as unmatched rather than dropped.
+`vendor_symbol_map` is the entry point: it derives most links from the panel's
+own renames, then applies `configs/vendor-symbol-map.toml` on top. The table
+earns its place because the vendor's snapshot grid is not the venue's cutover
+date — CoinMarketCap moves id 4172 to LUNC on its own schedule, Binance renamed
+on 2022-05-31, and the bar that fills an order is a Binance bar. A mapping where
+one base means two assets on one day raises rather than resolving itself, and
+assets on one vendor and not the other are reported as unmatched rather than
+dropped.
