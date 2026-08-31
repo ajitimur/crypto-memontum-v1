@@ -32,6 +32,10 @@ class NotEnoughBars(Exception):
 class RunResult:
     """One simulated run of one configuration.
 
+    Both annualised figures extrapolate the window, so a short window produces
+    large ones; `cost_drag_as_fraction_of_gross` is the scale-free reading and is
+    the one `docs/agents/quant-research.md` puts a ceiling on.
+
     `equity_net` is the daily-marked net equity curve, indexed on `ts_utc` and
     starting at the fill bar; equity is 1.0 at the Decision Bar by construction.
     Every return here is net of `cost_bps_per_side` charged on both legs, except
@@ -57,6 +61,7 @@ class RunResult:
     max_drawdown_peak_ts_utc: pd.Timestamp | None
     max_drawdown_trough_ts_utc: pd.Timestamp | None
     cost_drag_annualised: float
+    cost_drag_as_fraction_of_gross: float | None
 
 
 def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> RunResult:
@@ -99,6 +104,7 @@ def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> Ru
     ann_return_gross = _annualise(gross_return, years)
     peak_ts, trough_ts, max_drawdown = _max_drawdown(equity_net)
 
+    cost_drag_annualised = ann_return_gross - ann_return_net
     return RunResult(
         decision_ts_utc=bars.index[0],
         entry_ts_utc=held.index[0],
@@ -118,8 +124,22 @@ def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> Ru
         max_drawdown=max_drawdown,
         max_drawdown_peak_ts_utc=peak_ts,
         max_drawdown_trough_ts_utc=trough_ts,
-        cost_drag_annualised=ann_return_gross - ann_return_net,
+        cost_drag_annualised=cost_drag_annualised,
+        cost_drag_as_fraction_of_gross=_fraction_of_gross(
+            cost_drag_annualised, ann_return_gross
+        ),
     )
+
+
+def _fraction_of_gross(cost_drag_annualised: float, ann_return_gross: float) -> float | None:
+    """Cost Drag as a share of gross annualised return.
+
+    `docs/agents/quant-research.md` caps this at one third. `None` when gross
+    return is not positive, because a share of a loss is not a meaningful ratio.
+    """
+    if ann_return_gross <= 0.0:
+        return None
+    return cost_drag_annualised / ann_return_gross
 
 
 def _daily_returns(equity_net: pd.Series) -> pd.Series:

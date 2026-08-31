@@ -24,6 +24,9 @@ from crypto_momentum.results import ResultStore, RunRecord
 from crypto_momentum.sim.buy_and_hold import RunResult, simulate_buy_and_hold
 from crypto_momentum.trials import TRIALS_FILENAME, append_trial
 
+# Timestamps that cross the JSON boundary are second-resolution UTC throughout.
+ISO_SECONDS = "%Y-%m-%dT%H:%M:%SZ"
+
 
 @dataclass(frozen=True)
 class Workspace:
@@ -108,8 +111,17 @@ def load_bars(
         raw_store.write(
             archive_file, payload, sha256=digest, fetched_at_utc=fetched_at_utc
         )
+    return rebuild_derived(config, workspace)
+
+
+def rebuild_derived(config: RunConfig, workspace: Workspace) -> pd.DataFrame:
+    """Rebuild `config`'s derived bars from whatever is already in `data/raw/`.
+
+    Fetches nothing: this is the path a researcher takes after deleting
+    `data/derived/`, and it must work with the network unplugged.
+    """
     return rebuild_daily_bars(
-        raw_store,
+        RawStore(workspace.raw_root),
         DerivedStore(workspace.derived_root),
         config.symbol,
         config.interval,
@@ -142,13 +154,14 @@ def metrics_of(result: RunResult) -> dict[str, Any]:
         "max_drawdown_peak_ts_utc": _iso(result.max_drawdown_peak_ts_utc),
         "max_drawdown_trough_ts_utc": _iso(result.max_drawdown_trough_ts_utc),
         "cost_drag_annualised": result.cost_drag_annualised,
+        "cost_drag_as_fraction_of_gross": result.cost_drag_as_fraction_of_gross,
     }
 
 
 def _iso(timestamp: pd.Timestamp | None) -> str | None:
     if timestamp is None:
         return None
-    return timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return timestamp.strftime(ISO_SECONDS)
 
 
 def _relative_to_repo(path: Path, repo_root: Path) -> str:

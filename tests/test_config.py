@@ -118,6 +118,17 @@ def test_a_config_that_is_not_toml_at_all_is_rejected_as_malformed(tmp_path):
         load_config(write(tmp_path, "name: skeleton\ndata:\n  symbol: BTCUSDT\n"))
 
 
+@pytest.mark.parametrize(
+    "name", ["../../escape", "results/../../etc/passwd", "with space", "", ".."]
+)
+def test_a_name_that_could_escape_the_results_directory_is_rejected(tmp_path, name):
+    """`name` is half the result key and becomes a path segment under results/."""
+    text = VALID.replace('name = "skeleton-btcusdt-2021h1"', f'name = "{name}"')
+
+    with pytest.raises(ConfigError, match="name"):
+        load_config(write(tmp_path, text))
+
+
 def test_a_missing_file_names_the_path(tmp_path):
     with pytest.raises(ConfigError, match="nope.toml"):
         load_config(tmp_path / "nope.toml")

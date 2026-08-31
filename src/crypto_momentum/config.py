@@ -16,6 +16,10 @@ from typing import Any
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]{4,20}$")
+# `name` becomes a path segment under `results/`, so it is restricted to
+# characters that cannot escape it. A config called `../../etc/passwd` would
+# otherwise write a result outside the results directory.
+NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
 SUPPORTED_VENUES = ("binance-spot",)
 SUPPORTED_INTERVALS = ("1d",)
@@ -85,6 +89,11 @@ def load_config(path: Path | str) -> RunConfig:
     _reject_unknown_keys(document)
 
     name = _require_str(document, "name", "name")
+    if not NAME_PATTERN.match(name) or ".." in name:
+        raise ConfigError(
+            "name must be a filename-safe identifier of letters, digits, dots, "
+            f"dashes and underscores — it becomes a path under results/ — got {name!r}"
+        )
     data = _require_table(document, "data")
     strategy = _require_table(document, "strategy")
     costs = _require_table(document, "costs")

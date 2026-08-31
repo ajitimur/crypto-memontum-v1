@@ -13,10 +13,9 @@ from crypto_momentum.config import ConfigError, load_config
 from crypto_momentum.data.binance_archive import ChecksumMismatch, MalformedArchiveFile
 from crypto_momentum.data.fetch import ArchiveUnavailable
 from crypto_momentum.data.raw_store import RawWindowAlreadyStored, RawWindowMissing
-from crypto_momentum.derive import DerivedStore, GapInWindow, rebuild_daily_bars
-from crypto_momentum.data.raw_store import RawStore
+from crypto_momentum.derive import GapInWindow
 from crypto_momentum.provenance import NotAGitRepository
-from crypto_momentum.runner import Workspace, run_config
+from crypto_momentum.runner import ISO_SECONDS, Workspace, rebuild_derived, run_config
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars
 from crypto_momentum.trials import read_trials
 
@@ -74,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run(config_path: Path, workspace: Workspace) -> int:
     # The wall clock is read here, at the edge, and passed in as a parameter so
     # that nothing below the CLI depends on it.
-    run_at_utc = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    run_at_utc = datetime.now(UTC).strftime(ISO_SECONDS)
     record = run_config(config_path, workspace, run_at_utc=run_at_utc)
     print(json.dumps(record.to_dict(), indent=2, sort_keys=True))
     if record.working_tree_dirty:
@@ -88,13 +87,7 @@ def _run(config_path: Path, workspace: Workspace) -> int:
 
 def _build_derived(config_path: Path, workspace: Workspace) -> int:
     config = load_config(config_path)
-    bars = rebuild_daily_bars(
-        RawStore(workspace.raw_root),
-        DerivedStore(workspace.derived_root),
-        config.symbol,
-        config.interval,
-        config.months(),
-    )
+    bars = rebuild_derived(config, workspace)
     print(f"rebuilt {len(bars)} {config.interval} bars for {config.symbol} from data/raw/")
     return 0
 

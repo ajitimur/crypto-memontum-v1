@@ -165,6 +165,9 @@ def test_the_same_bars_always_produce_the_same_result():
 
 ALLOWED_SIM_IMPORTS = {"__future__", "dataclasses", "math", "typing", "numpy", "pandas"}
 
+# Reaching the outside world without an import: these are the ways in.
+FORBIDDEN_SIM_CALLS = {"open", "__import__", "eval", "exec", "compile", "input"}
+
 
 def test_the_simulation_core_reaches_for_no_network_filesystem_or_clock():
     """The invariant, asserted structurally: nothing under `sim/` may import a
@@ -181,3 +184,18 @@ def test_the_simulation_core_reaches_for_no_network_filesystem_or_clock():
                 continue
             forbidden = imported - ALLOWED_SIM_IMPORTS
             assert not forbidden, f"{module_path.name} imports {sorted(forbidden)}"
+
+
+def test_the_simulation_core_reaches_the_outside_world_by_no_other_route():
+    """An allowlist of imports is not enough on its own: `open` and
+    `__import__` are builtins and need no import statement."""
+    for module_path in Path(sim_package.__file__).parent.glob("*.py"):
+        tree = ast.parse(module_path.read_text())
+        called = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert not called & FORBIDDEN_SIM_CALLS, (
+            f"{module_path.name} calls {sorted(called & FORBIDDEN_SIM_CALLS)}"
+        )
