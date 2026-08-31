@@ -80,24 +80,36 @@ def mark_daily(
     return MarkedPath(equity_net=equity, liquidation_ts_utc=None)
 
 
-def halted_at(bars: pd.DataFrame) -> pd.Timestamp | None:
-    """The first bar `bars`' asset could not have been traded on, or `None`.
+def is_tradeable_bar(bars: pd.DataFrame) -> pd.Series:
+    """True on each bar of `bars` an order could actually have filled at.
 
     A bar with no volume or no price is a bar no order could have filled at: the
-    venue pulled the pair, the asset unwound, or trading simply ceased. The exit
-    is the last tradeable price before the Halt, so a resumption afterwards is
-    deliberately ignored — waiting for one means knowing in advance it comes.
+    venue pulled the pair, the asset unwound, or trading simply ceased.
 
-    A price of zero printed on real volume is not a Halt. It is the asset trading
+    A price of zero printed on real volume is tradeable. It is the asset trading
     at nothing, which is the one path by which v1's long-only spot holding reaches
     a 100% loss; it is left in the series so the mark can liquidate on it rather
     than being booked as an exit at the last price that happened to be positive.
+
+    One rule in one place: the single-asset hold reads it as "where does this
+    position end", the cross-section as "which names could I have traded today",
+    and the two must not be able to drift apart.
     """
-    close = bars["close"].astype(float)
-    tradeable = close.notna()
+    tradeable = bars["close"].astype(float).notna()
     if "volume" in bars.columns:
         volume = bars["volume"].astype(float)
         tradeable &= volume.notna() & (volume > 0.0)
+    return tradeable
+
+
+def halted_at(bars: pd.DataFrame) -> pd.Timestamp | None:
+    """The first bar `bars`' asset could not have been traded on, or `None`.
+
+    The exit is the last tradeable price before the Halt, so a resumption
+    afterwards is deliberately ignored — waiting for one means knowing in advance
+    it comes.
+    """
+    tradeable = is_tradeable_bar(bars)
     if tradeable.all():
         return None
     return (~tradeable).idxmax()

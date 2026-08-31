@@ -25,8 +25,19 @@ from crypto_momentum.data.fetch import ArchiveUnavailable
 from crypto_momentum.data.raw_store import RawWindowAlreadyStored, RawWindowMissing
 from crypto_momentum.derive import GapInWindow
 from crypto_momentum.provenance import NotAGitRepository
-from crypto_momentum.runner import ISO_SECONDS, Workspace, rebuild_derived, run_config
+from crypto_momentum.data.archive_listing import MalformedListing
+from crypto_momentum.data.market_caps import UnmappableSymbol
+from crypto_momentum.data.symbol_map import AmbiguousTicker, MalformedOverrideTable
+from crypto_momentum.data.universe import SymbolNotCovered, UniverseError
+from crypto_momentum.runner import (
+    ISO_SECONDS,
+    Workspace,
+    rebuild_all_derived,
+    run_config,
+)
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars
+from crypto_momentum.sim.cross_sectional import NotEnoughHistory, SelectionError
+from crypto_momentum.sim.universe_policy import PolicyError
 from crypto_momentum.trials import read_trials
 
 EXIT_REFUSED = 2
@@ -34,21 +45,30 @@ EXIT_REFUSED = 2
 # Anything a researcher can cause with a bad config or a bad download. These are
 # reported as a one-line refusal rather than a traceback.
 REFUSALS = (
+    AmbiguousTicker,
     ArchiveUnavailable,
     ChecksumMismatch,
     ConfigError,
     GapInWindow,
     MalformedArchiveFile,
+    MalformedListing,
+    MalformedOverrideTable,
     MalformedPanel,
     NotAGitRepository,
     NotEnoughBars,
+    NotEnoughHistory,
     PanelAlreadyStored,
     PanelMissing,
     PanelPullFailed,
     PanelWindowNotCovered,
+    PolicyError,
     RawWindowAlreadyStored,
     RawWindowMissing,
+    SelectionError,
     SurvivorshipBiasedPanel,
+    SymbolNotCovered,
+    UniverseError,
+    UnmappableSymbol,
 )
 
 
@@ -113,8 +133,14 @@ def _run(config_path: Path, workspace: Workspace) -> int:
 
 def _build_derived(config_path: Path, workspace: Workspace) -> int:
     config = load_config(config_path)
-    bars = rebuild_derived(config, workspace)
-    print(f"rebuilt {len(bars)} {config.interval} bars for {config.symbol} from data/raw/")
+    built = rebuild_all_derived(config, workspace)
+    total = sum(len(bars) for bars in built.values())
+    print(
+        f"rebuilt {total} {config.interval} bars across {len(built)} symbol(s) "
+        "from data/raw/"
+    )
+    for symbol, bars in sorted(built.items()):
+        print(f"  {symbol}  {len(bars)} bars  {bars.index[0].date()} to {bars.index[-1].date()}")
     return 0
 
 
