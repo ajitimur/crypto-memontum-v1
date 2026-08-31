@@ -37,7 +37,11 @@ from crypto_momentum.policy import (
 from crypto_momentum.provenance import describe_head
 from crypto_momentum.results import ResultStore, RunRecord
 from crypto_momentum.sim.buy_and_hold import simulate_buy_and_hold
-from crypto_momentum.sim.cross_sectional import CrossSectionalRun, simulate_cross_sectional
+from crypto_momentum.sim.cross_sectional import (
+    CrossSectionalRun,
+    TurnoverBudgetBreached,
+    simulate_cross_sectional,
+)
 from crypto_momentum.sim.report import RunResult
 from crypto_momentum.sim.universe_policy import (
     TOKOCRYPTO,
@@ -84,20 +88,41 @@ def run_config(
 
     `run_at_utc` is passed in rather than read from the clock, so the runner
     itself stays reproducible; the CLI supplies the wall-clock value.
+
+    A run refused for breaching its turnover budget still appends a line to the
+    trials log before the exception leaves here. It is a configuration that was
+    tried and rejected on its merits, not a malformed file, and both the
+    reporting protocol and the out-of-sample invariant want the count of
+    configurations tried to be complete. No result file is written: there is no
+    result, which is the point.
     """
     config_path = Path(config_path)
     config = load_config(config_path)
     config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
     provenance = describe_head(workspace.repo_root)
 
-    if config.strategy_kind == CROSS_SECTIONAL:
-        metrics, window, portfolio = _run_cross_sectional(
-            config, workspace, run_at_utc=run_at_utc, open_url=open_url
+    try:
+        if config.strategy_kind == CROSS_SECTIONAL:
+            metrics, window, portfolio = _run_cross_sectional(
+                config, workspace, run_at_utc=run_at_utc, open_url=open_url
+            )
+        else:
+            metrics, window, portfolio = _run_single_asset(
+                config, workspace, run_at_utc=run_at_utc, open_url=open_url
+            )
+    except TurnoverBudgetBreached as breach:
+        append_trial(
+            workspace.trials_path,
+            _refused_trial(
+                config,
+                config_path=_relative_to_repo(config_path, workspace.repo_root),
+                config_sha256=config_sha256,
+                provenance=provenance,
+                run_at_utc=run_at_utc,
+                breach=breach,
+            ),
         )
-    else:
-        metrics, window, portfolio = _run_single_asset(
-            config, workspace, run_at_utc=run_at_utc, open_url=open_url
-        )
+        raise
 
     record = RunRecord(
         commit=provenance.commit,
@@ -397,6 +422,41 @@ def metrics_of(result: RunResult) -> dict[str, Any]:
         "max_drawdown_trough_ts_utc": _iso(result.max_drawdown_trough_ts_utc),
         "cost_drag_annualised": result.cost_drag_annualised,
         "cost_drag_as_fraction_of_gross": result.cost_drag_as_fraction_of_gross,
+    }
+
+
+def _refused_trial(
+    config: RunConfig,
+    *,
+    config_path: str,
+    config_sha256: str,
+    provenance: Any,
+    run_at_utc: str,
+    breach: TurnoverBudgetBreached,
+) -> dict[str, Any]:
+    """The trials line for a configuration that was tried and then refused.
+
+    Deliberately the same key as a successful trial — commit, config name and
+    fingerprint — so the log can be counted without filtering, and deliberately
+    carrying no metrics, because none were produced. `refused` is what tells the
+    two apart, and it names the number that did it.
+    """
+    return {
+        "run_at_utc": run_at_utc,
+        "commit": provenance.commit,
+        "working_tree_dirty": provenance.working_tree_dirty,
+        "config_name": config.name,
+        "config_path": config_path,
+        "config_sha256": config_sha256,
+        "strategy_kind": config.strategy_kind,
+        "start_month": config.start_month,
+        "end_month": config.end_month,
+        "cost_model": config.cost_model.name,
+        "cost_bps_per_side": config.cost_bps_per_side,
+        "refused": "turnover_budget_breached",
+        "weekly_rebalance_turnover": breach.realised_weekly_turnover,
+        "max_weekly_rebalance_turnover": breach.budget,
+        "refused_reason": str(breach),
     }
 
 

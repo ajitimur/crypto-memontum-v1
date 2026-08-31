@@ -41,12 +41,24 @@ class RunRecord:
             "run_at_utc": self.run_at_utc,
             "config_path": self.config_path,
             "config_sha256": self.config_sha256,
-            "config": asdict(self.config),
+            "config": self._config_as_written(),
             "window": self.window,
             "costs": self.costs,
             "portfolio": self.portfolio,
             "metrics": self.metrics,
         }
+
+    def _config_as_written(self) -> dict[str, Any]:
+        """The config as the TOML file states it, cost model named rather than spelt.
+
+        The model's fee, tax and levy live in the `costs` block, once. Nesting
+        them here as well would put two copies of the same three numbers in one
+        file — they cannot disagree today, but a reader has no way to know which
+        is the authority, and a later edit to one of them would make it matter.
+        """
+        written = asdict(self.config)
+        written["cost_model"] = self.config.cost_model.name
+        return written
 
     def trial_line(self) -> dict[str, Any]:
         """The flat one-line summary appended to the trials log.

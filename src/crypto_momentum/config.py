@@ -19,7 +19,7 @@ from crypto_momentum.costs import (
     TURNOVER_CEILING_WEEKLY,
     CostModel,
     CostModelError,
-    cost_model,
+    cost_model_named,
 )
 from crypto_momentum.sim.cross_sectional import (
     DEFAULT_CAP_STALENESS_DAYS,
@@ -210,7 +210,7 @@ def _require_cost_model(costs: dict[str, Any]) -> CostModel:
     """
     name = _require_choice(costs, "model", "costs.model", COST_MODEL_NAMES)
     try:
-        return cost_model(name)
+        return cost_model_named(name)
     except CostModelError as error:  # pragma: no cover — _require_choice gets there first
         raise ConfigError(str(error)) from error
 

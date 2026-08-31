@@ -124,10 +124,11 @@ class CostModel:
             "bps_per_side": self.bps_per_side,
             "round_trip_bps": self.round_trip_bps,
             "source": self.source,
-            # Stated rather than implied: a reader comparing this to a perp
-            # strategy's numbers should not have to infer the omission.
-            "funding_bps": 0.0,
-            "funding_note": "unlevered long-only spot holds no perpetual position",
+            # Said in words rather than as a rate. A `funding_bps: 0.0` here
+            # would be the very thing this module's docstring argues against —
+            # it reads as a funding model that happened to price at zero, when
+            # what is true is that there is no funding leg to price.
+            "funding": "none — unlevered long-only spot holds no perpetual position",
         }
 
 
@@ -157,7 +158,7 @@ COST_MODELS: dict[str, CostModel] = {model.name: model for model in (PAPER, TOKO
 COST_MODEL_NAMES = tuple(COST_MODELS)
 
 
-def cost_model(name: str) -> CostModel:
+def cost_model_named(name: str) -> CostModel:
     """Look a model up by the name a config gives it."""
     try:
         return COST_MODELS[name]

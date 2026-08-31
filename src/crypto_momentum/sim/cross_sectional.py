@@ -180,21 +180,39 @@ class CrossSectionalRun:
         return tuple(selection.turnover for selection in self.selections[1:])
 
     @property
-    def mean_rebalance_turnover(self) -> float:
+    def mean_rebalance_turnover(self) -> float | None:
+        """The average of the measured rebalances, or `None` if there were none.
+
+        The budget binds on the mean rather than the worst week: Cost Drag is
+        what the ceiling is protecting against, and that accumulates at the
+        average rate. `max_rebalance_turnover` is reported beside it so a run
+        whose average hides one very expensive rebalance is still visible.
+        """
+        if not self.rebalance_turnovers:
+            return None
         return _mean(self.rebalance_turnovers)
 
     @property
-    def max_rebalance_turnover(self) -> float:
-        return max(self.rebalance_turnovers, default=0.0)
+    def max_rebalance_turnover(self) -> float | None:
+        if not self.rebalance_turnovers:
+            return None
+        return max(self.rebalance_turnovers)
 
     @property
-    def weekly_rebalance_turnover(self) -> float:
+    def weekly_rebalance_turnover(self) -> float | None:
         """Mean Rebalance Turnover on the weekly footing ADR-0007's ceiling uses.
 
         A per-rebalance figure is not comparable to a weekly ceiling unless the
         rebalance happens to be weekly, and the whole point of the ceiling is to
         make longer holding periods look as attractive as they are.
+
+        `None` when the window held only the opening fill. There is then no
+        rebalance to measure, and reporting 0.0 would say the book was held
+        without trading — which reads like a run that comfortably cleared the
+        ceiling rather than one that never tested it.
         """
+        if not self.rebalance_turnovers:
+            return None
         return weekly_turnover(
             self.mean_rebalance_turnover, holding_days=self.holding_days
         )
@@ -468,11 +486,13 @@ def simulate_cross_sectional(
         max_cap_staleness_days=max_cap_staleness_days,
         max_weekly_rebalance_turnover=max_weekly_rebalance_turnover,
     )
-    if run.weekly_rebalance_turnover > max_weekly_rebalance_turnover:
+    realised = run.weekly_rebalance_turnover
+    # `None` is "never measured", not "measured at zero". A window holding only
+    # its opening fill has not been tested against the budget, so it does not get
+    # to pass it either.
+    if realised is not None and realised > max_weekly_rebalance_turnover:
         raise TurnoverBudgetBreached(
-            run.weekly_rebalance_turnover,
-            max_weekly_rebalance_turnover,
-            holding_days=holding_days,
+            realised, max_weekly_rebalance_turnover, holding_days=holding_days
         )
     return run
 

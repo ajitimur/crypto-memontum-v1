@@ -131,8 +131,10 @@ def test_the_record_carries_the_config_that_produced_it(tmp_path):
     written = json.loads(path.read_text())
 
     assert written["config"]["symbol"] == "BTCUSDT"
-    assert written["config"]["cost_model"]["name"] == "tokocrypto"
-    assert written["config"]["cost_model"]["tax_bps_per_side"] == 21.0
+    # The config records the model by the name its TOML gives it. The fee, tax
+    # and levy behind that name live in the `costs` block, once, so the file
+    # never carries two copies of the same three numbers.
+    assert written["config"]["cost_model"] == "tokocrypto"
     assert written["commit"] == "a" * 40
     assert written["config_sha256"] == "0" * 64
     assert written["working_tree_dirty"] is False

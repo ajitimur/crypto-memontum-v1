@@ -205,6 +205,36 @@ class TestTheBudgetTheRunnerEnforces:
 
         assert run.weekly_rebalance_turnover <= run.max_weekly_rebalance_turnover
 
+    def test_a_window_with_nothing_to_measure_reports_none_not_zero(self):
+        # A window ending right after the opening fill has one selection, so
+        # there is no rebalance to measure. Reporting 0.0 would say the book was
+        # held without trading — a run that cleared the ceiling — when the truth
+        # is that it was never tested against it.
+        bars, tradeable, caps = market()
+        eight_days = pd.date_range(
+            "2021-01-01", periods=8, freq="D", tz="UTC", name="ts_utc"
+        )
+
+        run = simulate_cross_sectional(
+            {symbol: frame.loc[eight_days] for symbol, frame in bars.items()},
+            tradeable=tradeable.loc[eight_days],
+            market_caps=caps,
+            lookback_days=1,
+            holding_days=7,
+            quantile=1.0,
+            min_universe=2,
+            cost_bps_per_side=0.0,
+            max_weekly_rebalance_turnover=0.25,
+        )
+
+        assert len(run.selections) == 1
+        assert run.rebalance_turnovers == ()
+        assert run.mean_rebalance_turnover is None
+        assert run.max_rebalance_turnover is None
+        assert run.weekly_rebalance_turnover is None
+        # And an unmeasurable run does not get to pass the budget by default.
+        assert run.to_metadata()["weekly_rebalance_turnover"] is None
+
     def test_a_budget_of_nothing_is_refused(self):
         # Whether a budget is *permissible* is ADR-0007's question and the config
         # loader's to answer — the core deliberately does not re-decide it, or

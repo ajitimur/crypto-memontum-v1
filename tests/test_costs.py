@@ -13,7 +13,7 @@ from crypto_momentum.costs import (
     TURNOVER_CEILING_WEEKLY,
     CostModel,
     CostModelError,
-    cost_model,
+    cost_model_named,
     weekly_turnover,
 )
 
@@ -50,9 +50,13 @@ class TestTheTwoModels:
 
     def test_neither_model_carries_a_funding_leg(self):
         # v1 is unlevered long-only spot per ADR-0004, so there is no perpetual
-        # position to fund. Recorded as an explicit zero rather than an omission.
+        # position to fund. Said in words, and deliberately not as a rate: a
+        # `funding_bps: 0.0` would read as a funding model that priced at zero
+        # rather than as the absence of one.
         for model in (PAPER, TOKOCRYPTO):
-            assert model.to_metadata()["funding_bps"] == 0.0
+            metadata = model.to_metadata()
+            assert "funding_bps" not in metadata
+            assert metadata["funding"].startswith("none")
 
     def test_a_model_records_where_its_numbers_came_from(self):
         assert "ADR-0007" in TOKOCRYPTO.to_metadata()["source"]
@@ -60,12 +64,12 @@ class TestTheTwoModels:
 
 class TestLookingAModelUp:
     def test_a_model_is_found_by_the_name_a_config_gives_it(self):
-        assert cost_model("tokocrypto") is TOKOCRYPTO
-        assert cost_model("paper") is PAPER
+        assert cost_model_named("tokocrypto") is TOKOCRYPTO
+        assert cost_model_named("paper") is PAPER
 
     def test_an_unknown_model_names_the_ones_that_exist(self):
         with pytest.raises(CostModelError, match="paper, tokocrypto"):
-            cost_model("binance")
+            cost_model_named("binance")
 
 
 class TestAModelTheSimulatorCannotPrice:
