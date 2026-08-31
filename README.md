@@ -18,10 +18,35 @@ simulates, writes the result to `results/<commit>/<config-name>.json`, and
 appends one line to `trials.jsonl`.
 
 ```sh
+uv run momentum grid configs/xsec-grid-2021h1.toml                  # all 21 cells, one invocation
 uv run momentum build-derived configs/skeleton-btcusdt-2021q1.toml  # rebuild without fetching
 uv run momentum pull-cmc-panel                                      # the one-time market-cap pull
 uv run momentum trials                                              # every configuration tried
 ```
+
+## The Grid
+
+A config whose `[strategy]` names a `grid` instead of a `lookback_days` and a
+`holding_days` is 21 runs, not one, and `momentum grid` runs all of them. The 21
+pairs are Han, Kang and Ryu's own, in `src/crypto_momentum/sim/grid.py` beside
+the citation; a config chooses between published grids by name and cannot
+compose one, for the reason `costs.model` is a name rather than a number of
+basis points.
+
+Each cell is filed at
+`results/<commit>/<grid-config-name>/<grid-config-name>-l<j>-h<k>.json` with the
+grid's own summary at `grid.json` beside them, and each appends its own line to
+`trials.jsonl`. **21 cells count as 21 configurations tried, not one** — that is
+the multiple testing the reporting protocol asks to be counted, and the reason
+Han et al. hold their own grid to `t > 3.0`.
+
+The grid reads the archive, the point-in-time Universe and the vendor panel once
+for all 21 cells, so the cells differ in their two knobs and in nothing else. A
+cell that breaches its turnover budget, or whose lookback the window is too short
+for, is recorded as refused and the grid carries on: that is a finding about the
+cell, and stopping would leave the remaining configurations both unrun and
+uncounted. A fault in the *data* is not caught — it would fail all 21 identically,
+and twenty-one refusals for one missing file would read as a result.
 
 ## Layout
 
@@ -29,7 +54,7 @@ uv run momentum trials                                              # every conf
 | --- | --- |
 | `data/raw/` | Archive files exactly as fetched, plus a manifest per file. Append-only: re-fetching a stored window raises. Gitignored. |
 | `data/derived/` | Bars rebuilt from raw by `momentum build-derived`. Disposable — delete it and the next run rebuilds it. Gitignored. |
-| `results/` | One JSON result per `(commit, config)`. Gitignored. |
+| `results/` | One JSON result per `(commit, config)`; a Grid's cells sit together under the grid config's own directory, with `grid.json` summarising the shape. Gitignored. |
 | `trials.jsonl` | Every run ever made, appended, git-tracked. The count of configurations tried that every reported result has to quote. |
 | `configs/` | Run configs and `vendor-symbol-map.toml`. Inert TOML — the loader validates and cannot execute. |
 | `scripts/pull_cmc_panel.R` | The one-time `crypto2` pull. Needs R; run once, never again. Both window bounds are required — it will not read the clock. |

@@ -328,3 +328,94 @@ class TestCrossSectionalConfig:
         assert cfg.bracket == "binance-full"
         # No floor asked for is no floor applied, and the result says which.
         assert cfg.liquidity_floor_usd is None
+
+
+GRID = """
+name = "xsec-grid-2021h1"
+
+[data]
+venue = "binance-spot"
+symbols = ["BTCUSDT", "ETHUSDT", "SRMUSDT"]
+interval = "1d"
+start_month = "2021-01"
+end_month = "2021-03"
+
+[strategy]
+kind = "cross_sectional"
+grid = "han-kang-ryu-21"
+quantile = 0.2
+
+[costs]
+model = "tokocrypto"
+slippage_bps_per_side = 5.0
+"""
+
+
+class TestGridConfig:
+    def test_a_grid_config_names_a_published_grid_and_no_single_cell(self, tmp_path):
+        cfg = load_config(write(tmp_path, GRID))
+
+        assert cfg.is_grid
+        assert cfg.grid == "han-kang-ryu-21"
+        # The two knobs the grid stands in for are unset, because no one cell is
+        # the run: a config holding both a grid and a lookback would run one of
+        # them and record the other.
+        assert cfg.lookback_days is None
+        assert cfg.holding_days is None
+
+    def test_the_grid_expands_to_twenty_one_runnable_cells(self, tmp_path):
+        cfg = load_config(write(tmp_path, GRID))
+
+        cells = cfg.cells()
+
+        assert len(cells) == 21
+        assert [(c.lookback_days, c.holding_days) for c in cells[:2]] == [(1, 7), (1, 14)]
+
+    def test_a_cell_carries_the_whole_config_but_its_own_two_knobs(self, tmp_path):
+        cfg = load_config(write(tmp_path, GRID))
+
+        cell = cfg.cell_config(cfg.cells()[13])
+
+        assert (cell.lookback_days, cell.holding_days) == (14, 7)
+        assert cell.name == "xsec-grid-2021h1-l14-h7"
+        assert cell.symbols == cfg.symbols
+        assert cell.quantile == cfg.quantile
+        assert cell.turnover_budget_weekly == cfg.turnover_budget_weekly
+        # The cell is a run, not a grid: it cannot expand again.
+        assert cell.grid is None
+        assert not cell.is_grid
+
+    def test_a_plain_cross_sectional_config_is_not_a_grid(self, tmp_path):
+        cfg = load_config(write(tmp_path, CROSS_SECTIONAL))
+
+        assert cfg.grid is None
+        assert not cfg.is_grid
+        assert cfg.cells() == ()
+
+    def test_naming_a_grid_and_a_lookback_at_once_is_rejected(self, tmp_path):
+        text = GRID.replace(
+            'grid = "han-kang-ryu-21"', 'grid = "han-kang-ryu-21"\nlookback_days = 14'
+        )
+
+        with pytest.raises(ConfigError, match="lookback_days"):
+            load_config(write(tmp_path, text))
+
+    def test_an_unknown_grid_names_the_grids_that_exist(self, tmp_path):
+        text = GRID.replace("han-kang-ryu-21", "my-own-21")
+
+        with pytest.raises(ConfigError, match="han-kang-ryu-21"):
+            load_config(write(tmp_path, text))
+
+    def test_a_grid_on_a_single_asset_hold_is_rejected(self, tmp_path):
+        text = VALID.replace('kind = "buy_and_hold"', 'kind = "buy_and_hold"\ngrid = "han-kang-ryu-21"')
+
+        with pytest.raises(ConfigError, match="grid"):
+            load_config(write(tmp_path, text))
+
+    def test_a_name_too_long_to_suffix_a_cell_onto_is_rejected_up_front(self, tmp_path):
+        # The cell name becomes a path under results/, so the refusal belongs at
+        # load time — not on the nineteenth cell of a grid already half run.
+        text = GRID.replace('name = "xsec-grid-2021h1"', f'name = "{"g" * 78}"')
+
+        with pytest.raises(ConfigError, match="cell"):
+            load_config(write(tmp_path, text))

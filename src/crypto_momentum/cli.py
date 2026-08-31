@@ -1,4 +1,4 @@
-"""`momentum` — run a config, rebuild derived data, pull the panel, or read trials."""
+"""`momentum` — run a config or a Grid, rebuild derived data, pull the panel, or read trials."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from crypto_momentum.data.fetch import ArchiveUnavailable
 from crypto_momentum.data.raw_store import RawWindowAlreadyStored, RawWindowMissing
 from crypto_momentum.derive import GapInWindow
 from crypto_momentum.provenance import NotAGitRepository
+from crypto_momentum.results import GridCellRecord
 from crypto_momentum.data.archive_listing import MalformedListing
 from crypto_momentum.data.market_caps import UnmappableSymbol
 from crypto_momentum.data.symbol_map import AmbiguousTicker, MalformedOverrideTable
@@ -34,6 +35,7 @@ from crypto_momentum.runner import (
     Workspace,
     rebuild_all_derived,
     run_config,
+    run_grid,
 )
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars
 from crypto_momentum.sim.cross_sectional import (
@@ -41,6 +43,7 @@ from crypto_momentum.sim.cross_sectional import (
     SelectionError,
     TurnoverBudgetBreached,
 )
+from crypto_momentum.sim.grid import GridError
 from crypto_momentum.sim.report import PROFITABILITY_T_BAR
 from crypto_momentum.sim.universe_policy import PolicyError
 from crypto_momentum.trials import read_trials
@@ -55,6 +58,7 @@ REFUSALS = (
     ChecksumMismatch,
     ConfigError,
     GapInWindow,
+    GridError,
     MalformedArchiveFile,
     MalformedListing,
     MalformedOverrideTable,
@@ -93,6 +97,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = subcommands.add_parser("run", help="run one config end to end")
     run.add_argument("config", type=Path)
 
+    grid = subcommands.add_parser(
+        "grid", help="run every cell of a config's Grid in one invocation"
+    )
+    grid.add_argument("config", type=Path)
+
     build = subcommands.add_parser(
         "build-derived", help="rebuild derived bars from data/raw/ without fetching"
     )
@@ -111,6 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "run":
             return _run(args.config, workspace)
+        if args.command == "grid":
+            return _grid(args.config, workspace)
         if args.command == "build-derived":
             return _build_derived(args.config, workspace)
         if args.command == "pull-cmc-panel":
@@ -144,6 +155,69 @@ def _run(config_path: Path, workspace: Workspace) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def _grid(config_path: Path, workspace: Workspace) -> int:
+    """Run the whole Grid and print it as a table, cell by cell.
+
+    The JSON summary stays alone on stdout for the machine; the table is written
+    to stderr for the researcher reading along, in the grid's published order.
+    Never sorted by outcome — a grid ordered best-first is a ranking, and reading
+    a ranking is the mistake the Grid exists to prevent.
+    """
+    run_at_utc = datetime.now(UTC).strftime(ISO_SECONDS)
+    record = run_grid(config_path, workspace, run_at_utc=run_at_utc)
+    print(json.dumps(record.to_dict(), indent=2, sort_keys=True))
+
+    print(
+        f"{record.grid}: {record.n_recorded} of {len(record.cells)} cells recorded, "
+        f"{record.n_refused} refused, {record.n_liquidated} liquidated",
+        file=sys.stderr,
+    )
+    # "turnover/wk" rather than "turnover": CONTEXT.md reserves the bare word,
+    # and this column is Rebalance Turnover on a weekly basis.
+    print(
+        f"{'cell':>10}  {'sharpe':>8}  {'t(log)':>8}  {'turnover/wk':>11}  outcome",
+        file=sys.stderr,
+    )
+    for cell in record.cells:
+        print(f"{cell.name:>10}  {_describe_cell(cell)}", file=sys.stderr)
+    print(f"configurations tried: {record.configurations_tried}", file=sys.stderr)
+    if record.working_tree_dirty:
+        print(
+            "warning: the working tree was dirty, so this grid is not "
+            f"reproducible from commit {record.commit[:12]} alone",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _describe_cell(cell: GridCellRecord) -> str:
+    """One row of the grid table: the two numbers that decide, or the refusal.
+
+    A refused cell prints its reason where its numbers would be, rather than
+    dashes across the row — it was tried, and what stopped it is the finding.
+    """
+    if not cell.recorded:
+        return f"{'—':>8}  {'—':>8}  {'—':>11}  refused: {cell.refused}"
+    outcome = (
+        "liquidated"
+        if cell.liquidated
+        else ("clears hurdle" if cell.clears_deployment_hurdle else "below hurdle")
+    )
+    return (
+        f"{_number(cell.metrics.get('sharpe_net')):>8}  "
+        f"{_number(cell.metrics.get('mean_log_return_t_stat')):>8}  "
+        f"{_percent(cell.weekly_rebalance_turnover):>11}  {outcome}"
+    )
+
+
+def _number(value: float | None) -> str:
+    return "—" if value is None else f"{value:.2f}"
+
+
+def _percent(value: float | None) -> str:
+    return "—" if value is None else f"{value:.2%}"
 
 
 def _build_derived(config_path: Path, workspace: Workspace) -> int:

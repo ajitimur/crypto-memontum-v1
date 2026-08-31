@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ from crypto_momentum.sim.cross_sectional import (
     DEFAULT_CAP_STALENESS_DAYS,
     MIN_UNIVERSE,
 )
+from crypto_momentum.sim.grid import GRID_NAMES, GridCell, GridError, grid_named
 from crypto_momentum.sim.universe_policy import (
     BINANCE_FULL,
     BRACKETS,
@@ -51,6 +52,7 @@ SUPPORTED_STRATEGIES = (BUY_AND_HOLD, CROSS_SECTIONAL)
 _STRATEGY_KEYS: dict[str, tuple[str, ...]] = {
     BUY_AND_HOLD: (),
     CROSS_SECTIONAL: (
+        "grid",
         "lookback_days",
         "holding_days",
         "quantile",
@@ -100,6 +102,10 @@ class RunConfig:
     # config may budget tighter than the ceiling; it may not budget looser, and
     # the loader refuses one that tries before any bar is fetched.
     turnover_budget_weekly: float = TURNOVER_CEILING_WEEKLY
+    # The Grid this config stands for, if it stands for one. A grid config
+    # names no single cell: `lookback_days` and `holding_days` are unset, and
+    # `cell_config` fills them in per cell of `cells()`.
+    grid: str | None = None
     lookback_days: int | None = None
     holding_days: int | None = None
     quantile: float | None = None
@@ -108,6 +114,38 @@ class RunConfig:
     bracket: str = BINANCE_FULL
     liquidity_floor_usd: float | None = None
     liquidity_window_days: int = DEFAULT_WINDOW_DAYS
+
+    @property
+    def is_grid(self) -> bool:
+        """Whether this config is a Grid rather than a single run.
+
+        A grid produces no result of its own — there is no one cell to record —
+        so the runner dispatches on this rather than on a strategy kind.
+        """
+        return self.grid is not None
+
+    def cells(self) -> tuple[GridCell, ...]:
+        """The cells of this config's Grid, in the grid's own order.
+
+        Empty for a config that is not a grid, so a caller can ask without
+        checking first.
+        """
+        return () if self.grid is None else grid_named(self.grid)
+
+    def cell_config(self, cell: GridCell) -> "RunConfig":
+        """This config as it stands for one cell of its Grid.
+
+        `grid` is cleared, because the cell is a run and not a grid: leaving it
+        set would let a cell expand again, and would put a grid name on a result
+        that is one cell of it.
+        """
+        return replace(
+            self,
+            name=f"{self.name}-{cell.name}",
+            grid=None,
+            lookback_days=cell.lookback_days,
+            holding_days=cell.holding_days,
+        )
 
     @property
     def universe_symbols(self) -> tuple[str, ...]:
@@ -196,7 +234,7 @@ def load_config(path: Path | str) -> RunConfig:
             universe, "liquidity_window_days", "universe.liquidity_window_days",
             DEFAULT_WINDOW_DAYS,
         ),
-        **_strategy_parameters(strategy, strategy_kind),
+        **_strategy_parameters(strategy, strategy_kind, name=name),
     )
     return config
 
@@ -322,16 +360,13 @@ def _reject_foreign_strategy_keys(strategy: dict[str, Any], strategy_kind: str) 
             )
 
 
-def _strategy_parameters(strategy: dict[str, Any], strategy_kind: str) -> dict[str, Any]:
+def _strategy_parameters(
+    strategy: dict[str, Any], strategy_kind: str, *, name: str
+) -> dict[str, Any]:
     """The strategy's own knobs, each required and range-checked where it applies."""
     if strategy_kind != CROSS_SECTIONAL:
         return {}
-    lookback_days = _require_positive_int(
-        strategy, "lookback_days", "strategy.lookback_days"
-    )
-    holding_days = _require_positive_int(
-        strategy, "holding_days", "strategy.holding_days"
-    )
+    grid, lookback_days, holding_days = _require_grid_or_cell(strategy, name=name)
     quantile = _require_non_negative(strategy, "quantile", "strategy.quantile")
     if not 0.0 < quantile <= 1.0:
         raise ConfigError(
@@ -339,6 +374,7 @@ def _strategy_parameters(strategy: dict[str, Any], strategy_kind: str) -> dict[s
             f"be in (0, 1], got {quantile}"
         )
     return {
+        "grid": grid,
         "lookback_days": lookback_days,
         "holding_days": holding_days,
         "quantile": quantile,
@@ -355,6 +391,59 @@ def _strategy_parameters(strategy: dict[str, Any], strategy_kind: str) -> dict[s
             DEFAULT_CAP_STALENESS_DAYS,
         ),
     }
+
+
+def _require_grid_or_cell(
+    strategy: dict[str, Any], *, name: str
+) -> tuple[str | None, int | None, int | None]:
+    """Either a named Grid, or the one cell this config is — never both.
+
+    A grid stands in for the two knobs, so a config carrying a grid *and* a
+    lookback would run one of them and record the other. Naming the grid rather
+    than listing its pairs is the decision `costs.model` makes again: the 21
+    pairs are Han, Kang and Ryu's, and a grid this repo wrote for itself is not
+    something the Replication Gate can be run against.
+    """
+    if "grid" not in strategy:
+        return (
+            None,
+            _require_positive_int(strategy, "lookback_days", "strategy.lookback_days"),
+            _require_positive_int(strategy, "holding_days", "strategy.holding_days"),
+        )
+
+    grid = _require_choice(strategy, "grid", "strategy.grid", GRID_NAMES)
+    also_named = [key for key in ("lookback_days", "holding_days") if key in strategy]
+    if also_named:
+        spelt = ", ".join(f"strategy.{key}" for key in also_named)
+        raise ConfigError(
+            f"strategy.grid runs every cell of {grid}, so it supplies "
+            f"{' and '.join(also_named)} itself — remove {spelt}, or drop the "
+            "grid and run the one cell"
+        )
+    _check_cell_names_fit(grid, name=name)
+    return grid, None, None
+
+
+def _check_cell_names_fit(grid: str, *, name: str) -> None:
+    """That every cell of the grid still has a name `results/` will accept.
+
+    A cell's name is this config's with the cell's own suffix on it, so a long
+    enough config name pushes it past what `NAME_PATTERN` allows. Checked here,
+    across the whole grid, because the alternative is a grid that gets nineteen
+    cells in and then refuses.
+    """
+    try:
+        cells = grid_named(grid)
+    except GridError as error:  # pragma: no cover — _require_choice gets there first
+        raise ConfigError(str(error)) from error
+    for cell in cells:
+        cell_name = f"{name}-{cell.name}"
+        if not NAME_PATTERN.match(cell_name):
+            raise ConfigError(
+                f"name {name!r} is too long to run {grid} under: cell "
+                f"{cell.name} would be filed as {cell_name!r}, which is not a "
+                "name results/ accepts. Shorten the config name."
+            )
 
 
 def _optional_table(document: dict[str, Any], section: str) -> dict[str, Any]:

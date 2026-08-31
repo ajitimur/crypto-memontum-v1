@@ -14,7 +14,12 @@ from typing import Any
 
 import pandas as pd
 
-from crypto_momentum.config import CROSS_SECTIONAL, RunConfig, load_config
+from crypto_momentum.config import (
+    CROSS_SECTIONAL,
+    ConfigError,
+    RunConfig,
+    load_config,
+)
 from crypto_momentum.data.binance_archive import monthly_klines_file
 from crypto_momentum.data.cmc_panel import CmcPanelStore
 from crypto_momentum.data.fetch import ArchiveUnavailable, UrlOpener, fetch_archive_file
@@ -35,8 +40,18 @@ from crypto_momentum.policy import (
     load_venue_listing,
     policy_root,
 )
-from crypto_momentum.provenance import describe_head
-from crypto_momentum.results import ResultStore, RunRecord, refused_trial_line
+from crypto_momentum.provenance import Provenance, describe_head
+from crypto_momentum.results import (
+    RECORDED,
+    REFUSED,
+    TURNOVER_BUDGET_BREACHED,
+    GridCellRecord,
+    GridRecord,
+    ResultStore,
+    RunRecord,
+    configuration_fingerprint,
+    refused_trial_line,
+)
 from crypto_momentum.sim.benchmarks import (
     BENCHMARK_SYMBOL,
     btc_buy_and_hold,
@@ -50,9 +65,12 @@ from crypto_momentum.sim.buy_and_hold import (
 )
 from crypto_momentum.sim.cross_sectional import (
     CrossSectionalRun,
+    NotEnoughHistory,
+    SelectionError,
     TurnoverBudgetBreached,
     simulate_cross_sectional,
 )
+from crypto_momentum.sim.grid import GridCell
 from crypto_momentum.sim.report import RunResult
 from crypto_momentum.sim.universe_policy import (
     TOKOCRYPTO,
@@ -64,6 +82,21 @@ from crypto_momentum.trials import TRIALS_FILENAME, append_trial, read_trials
 
 # Timestamps that cross the JSON boundary are second-resolution UTC throughout.
 ISO_SECONDS = "%Y-%m-%dT%H:%M:%SZ"
+
+# Refusals a run's own knobs cause: turnover the budget will not pay for, a
+# lookback the window is too short to form, a quantile that selects nothing.
+# These are findings about the configuration, so they are recorded in the trials
+# log before the exception leaves, and a Grid records them per cell and carries
+# on. Anything else — a missing panel, an unreachable archive, an unreadable
+# policy file — is a fault in the workspace rather than the configuration. It
+# would fail all 21 cells identically, so it is left to propagate: twenty-one
+# refusals for one missing file would read as a result about the strategy.
+CELL_REFUSALS = (
+    NotEnoughBars,
+    NotEnoughHistory,
+    SelectionError,
+    TurnoverBudgetBreached,
+)
 
 
 @dataclass(frozen=True)
@@ -124,29 +157,77 @@ def run_config(
     """
     config_path = Path(config_path)
     config = load_config(config_path)
+    if config.is_grid:
+        raise ConfigError(
+            f"{config.name} names the grid {config.grid}, which is 21 runs and "
+            "not one — run it with `momentum grid` so every cell is recorded "
+            "and counted"
+        )
     config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
     provenance = describe_head(workspace.repo_root)
 
+    return _run_one(
+        config,
+        workspace,
+        run_at_utc=run_at_utc,
+        open_url=open_url,
+        provenance=provenance,
+        config_sha256=config_sha256,
+        config_path=_relative_to_repo(config_path, workspace.repo_root),
+        cross_section=None,
+    )
+
+
+def _run_one(
+    config: RunConfig,
+    workspace: Workspace,
+    *,
+    run_at_utc: str,
+    open_url: UrlOpener | None,
+    provenance: Provenance,
+    config_sha256: str,
+    config_path: str,
+    cross_section: "CrossSection | None",
+    grid: str = "",
+    grid_config_name: str = "",
+    fingerprint: str = "",
+) -> RunRecord:
+    """One run, simulated and recorded — whether it is a config or a grid cell.
+
+    The two paths share this so that a cell of a Grid differs from a config
+    written by hand for the same pair in its name and nothing else. If they
+    differed anywhere that mattered, the Grid would not be evidence about the
+    strategy.
+
+    `cross_section` is the shared inputs when the caller has already loaded them,
+    which is how a grid reads the archive, the Universe and the vendor panel once
+    for all 21 cells rather than 21 times.
+    """
     # Taken before the run either way: a refused configuration is one of the
     # configurations tried, so its trials line carries the same counts a
     # recorded one does. The log is appended below, so both paths see the same
     # numbers whichever way the run ends.
     counts = _counts_tried(
         workspace.trials_path,
-        config_sha256=config_sha256,
+        fingerprint=fingerprint or config_sha256,
         strategy_kind=config.strategy_kind,
     )
 
     try:
         if config.strategy_kind == CROSS_SECTIONAL:
             output = _run_cross_sectional(
-                config, workspace, run_at_utc=run_at_utc, open_url=open_url
+                config,
+                workspace,
+                run_at_utc=run_at_utc,
+                open_url=open_url,
+                cross_section=cross_section,
             )
         else:
             output = _run_single_asset(
                 config, workspace, run_at_utc=run_at_utc, open_url=open_url
             )
-    except TurnoverBudgetBreached as breach:
+    except CELL_REFUSALS as refusal:
+        described = describe_refusal(refusal)
         append_trial(
             workspace.trials_path,
             refused_trial_line(
@@ -154,13 +235,16 @@ def run_config(
                 commit=provenance.commit,
                 working_tree_dirty=provenance.working_tree_dirty,
                 run_at_utc=run_at_utc,
-                config_path=_relative_to_repo(config_path, workspace.repo_root),
+                config_path=config_path,
                 config_sha256=config_sha256,
+                configuration_fingerprint=fingerprint or config_sha256,
+                grid=grid,
                 configurations_tried=counts.configurations_tried,
                 trials_recorded=counts.trials_recorded,
-                realised_weekly_turnover=breach.realised_weekly_turnover,
-                budget=breach.budget,
-                reason=str(breach),
+                refused=described.slug,
+                reason=described.reason,
+                realised_weekly_turnover=described.realised_weekly_turnover,
+                budget=described.budget,
             ),
         )
         raise
@@ -170,7 +254,7 @@ def run_config(
         run_at_utc=run_at_utc,
         config=config,
         config_sha256=config_sha256,
-        config_path=_relative_to_repo(config_path, workspace.repo_root),
+        config_path=config_path,
         metrics=output.metrics,
         window=output.window,
         costs=cost_metadata(config),
@@ -180,10 +264,171 @@ def run_config(
         # came from. The log is appended below, so both are taken before it.
         configurations_tried=counts.configurations_tried,
         trials_recorded=counts.trials_recorded,
+        grid=grid,
+        grid_config_name=grid_config_name,
+        fingerprint=fingerprint,
     )
     ResultStore(workspace.results_root).write(record)
     append_trial(workspace.trials_path, record.trial_line())
     return record
+
+
+def run_grid(
+    config_path: Path | str,
+    workspace: Workspace,
+    *,
+    run_at_utc: str,
+    open_url: UrlOpener | None = None,
+) -> GridRecord:
+    """Run every cell of a config's Grid, in one invocation, and record the shape.
+
+    All 21 cells or none. A result is judged on the shape of the grid, and a
+    single cell that looks good is what this literature produces by accident:
+    21 pairs tested, the best one quoted. Running them together is what makes
+    the count of configurations tried honest, and what makes the Spearman
+    correlation ADR-0003 fixes its tolerance on computable at all.
+
+    A cell that cannot produce a result — its turnover breaches the budget, or
+    the window is too short for its lookback — is recorded as refused and the
+    grid carries on. That is a finding about the cell, and stopping the grid on
+    it would leave the remaining configurations both unrun and uncounted. A
+    failure of the *data* is not a cell's fault and is not caught here: it would
+    fail all 21 identically, and reporting twenty-one refusals for one missing
+    panel would read as a result.
+    """
+    config_path = Path(config_path)
+    config = load_config(config_path)
+    if not config.is_grid:
+        raise ConfigError(
+            f"{config.name} names no grid, so there is nothing for `momentum "
+            "grid` to expand — run it with `momentum run`, or give it a "
+            "[strategy] grid"
+        )
+    config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    provenance = describe_head(workspace.repo_root)
+    relative_path = _relative_to_repo(config_path, workspace.repo_root)
+
+    # Once, for the whole grid. The cells differ in two knobs and in nothing
+    # else, so they must see one archive, one point-in-time Universe and one
+    # vendor panel — a Universe that differed between cells would make the grid
+    # incomparable with itself, which is the one thing it has to be.
+    cross_section = load_cross_section_inputs(
+        config, workspace, fetched_at_utc=run_at_utc, open_url=open_url
+    )
+
+    cells: list[GridCellRecord] = []
+    for cell in config.cells():
+        cell_config = config.cell_config(cell)
+        fingerprint = configuration_fingerprint(config_sha256, cell=cell.name)
+        try:
+            record = _run_one(
+                cell_config,
+                workspace,
+                run_at_utc=run_at_utc,
+                open_url=open_url,
+                provenance=provenance,
+                config_sha256=config_sha256,
+                config_path=relative_path,
+                cross_section=cross_section,
+                grid=config.grid,
+                grid_config_name=config.name,
+                fingerprint=fingerprint,
+            )
+        except CELL_REFUSALS as refusal:
+            # `_run_one` has already appended the trials line, so the cell is
+            # counted whichever way it ended, and off the same description.
+            described = describe_refusal(refusal)
+            cells.append(
+                GridCellRecord(
+                    lookback_days=cell.lookback_days,
+                    holding_days=cell.holding_days,
+                    name=cell.name,
+                    config_name=cell_config.name,
+                    outcome=REFUSED,
+                    refused=described.slug,
+                    refused_reason=described.reason,
+                    weekly_rebalance_turnover=described.realised_weekly_turnover,
+                )
+            )
+            continue
+        cells.append(_recorded_cell(cell, record))
+
+    grid_record = GridRecord(
+        commit=provenance.commit,
+        working_tree_dirty=provenance.working_tree_dirty,
+        run_at_utc=run_at_utc,
+        grid=config.grid,
+        config=config,
+        config_sha256=config_sha256,
+        config_path=relative_path,
+        cells=tuple(cells),
+        # Read off the log after the last cell, so the count is what the log
+        # says rather than what the grid assumed it would say.
+        **counts_recorded(
+            workspace.trials_path, strategy_kind=config.strategy_kind
+        ).as_fields(),
+    )
+    ResultStore(workspace.results_root).write_grid(grid_record)
+    return grid_record
+
+
+def _recorded_cell(cell: GridCell, record: RunRecord) -> GridCellRecord:
+    """A cell that produced a result, summarised for the grid's own file."""
+    return GridCellRecord(
+        lookback_days=cell.lookback_days,
+        holding_days=cell.holding_days,
+        name=cell.name,
+        config_name=record.config.name,
+        outcome=RECORDED,
+        metrics=record.metrics,
+        n_rebalances=record.portfolio.get("n_rebalances"),
+        weekly_rebalance_turnover=record.portfolio.get("weekly_rebalance_turnover"),
+        clears_deployment_hurdle=record.benchmarks.get("deployment_hurdle", {}).get(
+            "clears"
+        ),
+    )
+
+
+# A slug per refusal, rather than its message, so a reader can count the runs
+# that failed the same way without matching on prose. The four are siblings, not
+# a hierarchy, so the order here is only the order they are searched in.
+_REFUSAL_SLUGS: tuple[tuple[type[Exception], str], ...] = (
+    (TurnoverBudgetBreached, TURNOVER_BUDGET_BREACHED),
+    (NotEnoughHistory, "not_enough_history"),
+    (NotEnoughBars, "not_enough_bars"),
+    (SelectionError, "selection_error"),
+)
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A refusal reduced to what gets recorded, in one place.
+
+    The trials line and the grid's cell both want the same four facts, and one
+    of them — the realised turnover — exists only for a breach. Deriving that
+    twice is how the log and the grid come to disagree about the same cell.
+    """
+
+    slug: str
+    reason: str
+    realised_weekly_turnover: float | None
+    budget: float | None
+
+
+def describe_refusal(refusal: Exception) -> Refusal:
+    """What a refused run records about why it produced nothing."""
+    breach = refusal if isinstance(refusal, TurnoverBudgetBreached) else None
+    for kind, slug in _REFUSAL_SLUGS:
+        if isinstance(refusal, kind):
+            break
+    else:  # pragma: no cover — only reachable if CELL_REFUSALS grows past the slugs
+        slug = "refused"
+    return Refusal(
+        slug=slug,
+        reason=str(refusal),
+        realised_weekly_turnover=None if breach is None else breach.realised_weekly_turnover,
+        budget=None if breach is None else breach.budget,
+    )
 
 
 def _run_single_asset(
@@ -221,26 +466,42 @@ def _run_single_asset(
     )
 
 
-def _run_cross_sectional(
+@dataclass(frozen=True)
+class CrossSection:
+    """What a cross-sectional run reads that does not depend on its two knobs.
+
+    The bars, the Universe after policy, and the vendor capitalisations. A Grid
+    loads this once and hands the same object to all 21 cells: the cells differ
+    in lookback and holding period and must differ in nothing else, and a
+    Universe rebuilt per cell is a Universe that can quietly disagree with
+    itself between them.
+    """
+
+    bars_by_symbol: dict[str, pd.DataFrame]
+    tradeable: pd.DataFrame
+    universe_metadata: dict[str, Any]
+    market_caps: pd.DataFrame
+
+
+def load_cross_section_inputs(
     config: RunConfig,
     workspace: Workspace,
     *,
-    run_at_utc: str,
-    open_url: UrlOpener | None,
-) -> RunOutput:
-    """The cross-sectional path, where the three layers meet.
+    fetched_at_utc: str,
+    open_url: UrlOpener | None = None,
+) -> CrossSection:
+    """Everything the cross-section stands on, in the order the layers stack.
 
-    In order: the archive says which months each symbol ever published and the
-    bars are built from those; the point-in-time Universe is reconstructed from
-    that same coverage, narrowed to the days real bars exist for; policy removes
-    what we would not consider holding; the vendor panel supplies the weights;
-    and only then does the simulator see anything.
+    The archive says which months each symbol ever published and the bars are
+    built from those; the point-in-time Universe is reconstructed from that same
+    coverage, narrowed to the days real bars exist for; policy removes what we
+    would not consider holding; and the vendor panel supplies the weights.
 
-    Nothing here reaches past the run's own window, and nothing in the
-    simulation core reaches back out to a store.
+    Nothing here reaches past the run's own window, and nothing in the simulation
+    core reaches back out to a store.
     """
     bars_by_symbol, coverages = load_cross_section(
-        config, workspace, fetched_at_utc=run_at_utc, open_url=open_url
+        config, workspace, fetched_at_utc=fetched_at_utc, open_url=open_url
     )
     panel = build_universe_panel(
         coverages,
@@ -272,14 +533,41 @@ def _run_cross_sectional(
         floor=floor,
     )
 
-    caps = market_cap_panel(
-        CmcPanelStore(workspace.raw_root).read_panel(),
-        config.universe_symbols,
-        repo_root=workspace.repo_root,
+    return CrossSection(
+        bars_by_symbol=bars_by_symbol,
+        tradeable=after_policy.tradeable,
+        universe_metadata=after_policy.metadata,
+        market_caps=market_cap_panel(
+            CmcPanelStore(workspace.raw_root).read_panel(),
+            config.universe_symbols,
+            repo_root=workspace.repo_root,
+        ),
     )
+
+
+def _run_cross_sectional(
+    config: RunConfig,
+    workspace: Workspace,
+    *,
+    run_at_utc: str,
+    open_url: UrlOpener | None,
+    cross_section: CrossSection | None = None,
+) -> RunOutput:
+    """One cell of the cross-section: the shared inputs, ranked on this lookback.
+
+    `cross_section` is loaded here when the caller has not already done it, which
+    is every path but a Grid's.
+    """
+    if cross_section is None:
+        cross_section = load_cross_section_inputs(
+            config, workspace, fetched_at_utc=run_at_utc, open_url=open_url
+        )
+    bars_by_symbol = cross_section.bars_by_symbol
+    caps = cross_section.market_caps
+
     run = simulate_cross_sectional(
         bars_by_symbol,
-        tradeable=after_policy.tradeable,
+        tradeable=cross_section.tradeable,
         market_caps=caps,
         lookback_days=config.lookback_days,
         holding_days=config.holding_days,
@@ -295,7 +583,7 @@ def _run_cross_sectional(
     # is that one of them ranked on the signal.
     market = cap_weighted_market(
         bars_by_symbol,
-        tradeable=after_policy.tradeable,
+        tradeable=cross_section.tradeable,
         market_caps=caps,
         lookback_days=config.lookback_days,
         holding_days=config.holding_days,
@@ -314,7 +602,7 @@ def _run_cross_sectional(
             "n_bars_by_symbol": {
                 symbol: len(bars) for symbol, bars in sorted(bars_by_symbol.items())
             },
-            "universe": after_policy.metadata,
+            "universe": cross_section.universe_metadata,
         },
         portfolio=run.to_metadata(),
         benchmarks=_benchmarks(
@@ -349,33 +637,61 @@ class Counts:
     configurations_tried: int
     trials_recorded: int
 
+    def as_fields(self) -> dict[str, int]:
+        return {
+            "configurations_tried": self.configurations_tried,
+            "trials_recorded": self.trials_recorded,
+        }
 
-def _counts_tried(
-    trials_path: Path, *, config_sha256: str, strategy_kind: str
-) -> Counts:
+
+def _counts_tried(trials_path: Path, *, fingerprint: str, strategy_kind: str) -> Counts:
     """Count the search behind this run, from the trials log.
 
     A configuration is its fingerprint, not its name: editing a config and
     running it again is a second configuration tried, and running the same bytes
-    twice is not. The count is confined to trials of the same strategy, because
-    the protocol asks how many configurations were tried to reach *this* number
-    — a cross-sectional result did not become more mined because a buy-and-hold
-    skeleton was run first.
+    twice is not. For a cell of a Grid the fingerprint covers the cell too, so a
+    grid of 21 counts as 21 — see `results.configuration_fingerprint`. The count
+    is confined to trials of the same strategy, because the protocol asks how
+    many configurations were tried to reach *this* number — a cross-sectional
+    result did not become more mined because a buy-and-hold skeleton was run
+    first.
 
-    A trial logged before fingerprints were recorded has no fingerprint to count
-    and is left out of the configuration count rather than collapsed into one.
-    It is still counted as a run.
+    A trial logged before fingerprints were recorded falls back to its config
+    digest, which is what the fingerprint of a non-grid run is anyway. One with
+    neither is left out of the configuration count rather than collapsed into
+    one; it is still counted as a run.
     """
     trials = read_trials(trials_path)
-    fingerprints = {
-        trial["config_sha256"]
-        for trial in trials
-        if trial.get("config_sha256") and trial.get("strategy_kind") == strategy_kind
-    }
     return Counts(
-        configurations_tried=len(fingerprints | {config_sha256}),
+        configurations_tried=len(_fingerprints_in(trials, strategy_kind) | {fingerprint}),
         trials_recorded=len(trials) + 1,
     )
+
+
+def counts_recorded(trials_path: Path, *, strategy_kind: str) -> Counts:
+    """The same counts, for a log that is already complete.
+
+    A Grid reads this after its last cell rather than assuming a run is still to
+    come, so the number it reports is what the log says rather than what the
+    grid expected it to say.
+    """
+    trials = read_trials(trials_path)
+    return Counts(
+        configurations_tried=len(_fingerprints_in(trials, strategy_kind)),
+        trials_recorded=len(trials),
+    )
+
+
+def _fingerprints_in(trials: list[dict[str, Any]], strategy_kind: str) -> set[str]:
+    return {
+        fingerprint
+        for trial in trials
+        if trial.get("strategy_kind") == strategy_kind
+        and (
+            fingerprint := trial.get("configuration_fingerprint")
+            or trial.get("config_sha256")
+        )
+    }
 
 
 def _benchmarks(
