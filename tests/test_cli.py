@@ -3,7 +3,13 @@
 from datetime import date
 from pathlib import Path
 
-from crypto_momentum.cli import EXIT_REFUSED, main
+from crypto_momentum.cli import (
+    EXIT_REFUSED,
+    _describe_divergence,
+    _describe_hurdle,
+    _describe_profitability,
+    main,
+)
 from crypto_momentum.data.cmc_panel import CmcPanelStore
 from crypto_momentum.trials import append_trial
 
@@ -113,3 +119,91 @@ def test_a_missing_r_toolchain_refuses_with_a_message_not_a_traceback(
 
     assert exit_code == EXIT_REFUSED
     assert "Rscript" in capsys.readouterr().err
+
+
+CLEARED = {
+    "mean_log_return_daily_net": 0.002,
+    "mean_log_return_t_stat": 4.2,
+    "newey_west_lags": 3,
+    "mean_return_daily_net": 0.0025,
+    "mean_return_sign_divergence": False,
+    "clears_profitability_bar": True,
+}
+
+
+def test_the_profitability_line_quotes_the_statistic_that_decides():
+    """ADR-0002: the bar is t > 3.0 on the mean log return, and the line says so."""
+    line = _describe_profitability(CLEARED)
+
+    assert "t = 4.20" in line
+    assert "3 lags" in line
+    assert "clears" in line
+
+
+def test_a_run_below_the_bar_is_not_described_as_having_cleared_it():
+    line = _describe_profitability(
+        {
+            **CLEARED,
+            "mean_log_return_t_stat": 2.5,
+            "clears_profitability_bar": False,
+        }
+    )
+
+    assert "below" in line
+    assert "clears" not in line
+
+
+def test_a_run_with_no_t_statistic_says_so_rather_than_quoting_nothing():
+    line = _describe_profitability({**CLEARED, "mean_log_return_t_stat": None})
+
+    assert "no t-statistic" in line
+
+
+def test_diverging_means_are_called_out_on_their_own_line():
+    """The divergence ADR-0002 asks for explicitly, not left to be inferred."""
+    line = _describe_divergence(
+        {
+            **CLEARED,
+            "mean_return_daily_net": 0.05,
+            "mean_log_return_daily_net": -0.0525,
+            "mean_return_sign_divergence": True,
+        }
+    )
+
+    assert "disagree in sign" in line
+    assert "0.05" in line and "-0.0525" in line
+
+
+def test_means_that_agree_report_that_they_agree():
+    assert "agree in sign" in _describe_divergence(CLEARED)
+
+
+def test_a_liquidated_run_says_it_has_no_mean_log_return_to_compare():
+    """The divergence line must not read as "they agree" on a path that has no
+    mean log return at all — that is the loudest version of the diagnostic."""
+    line = _describe_divergence(
+        {
+            **CLEARED,
+            "mean_log_return_daily_net": None,
+            "mean_return_sign_divergence": False,
+        }
+    )
+
+    assert "liquidated" in line
+    assert "agree in sign" not in line
+
+
+def test_the_hurdle_line_names_the_condition_that_failed():
+    line = _describe_hurdle(
+        {
+            "deployment_hurdle": {
+                "sharpe_above_btc": True,
+                "drawdown_no_worse_than_btc": False,
+                "clears_profitability_bar": True,
+                "clears": False,
+            }
+        }
+    )
+
+    assert "not cleared" in line
+    assert "drawdown_no_worse_than_btc" in line

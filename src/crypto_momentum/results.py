@@ -29,6 +29,16 @@ class RunRecord:
     # How the positions were formed: the strategy's own knobs, its turnover, its
     # exposure. Empty for a strategy that holds one thing and never trades again.
     portfolio: dict[str, Any] = field(default_factory=dict)
+    # What the run is read against: BTC buy-and-hold, the cap-weighted market
+    # portfolio, and ADR-0005's three-condition hurdle over the same window.
+    benchmarks: dict[str, Any] = field(default_factory=dict)
+    # How many configurations had been tried, this one included, when it ran —
+    # counted by config fingerprint, so a re-run of the same bytes is not a
+    # second configuration. The protocol requires it beside every quoted number,
+    # so it travels with the number rather than living only in a log someone has
+    # to go and count. `trials_recorded` is the run count beside it.
+    configurations_tried: int = 0
+    trials_recorded: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,6 +50,9 @@ class RunRecord:
             "config": asdict(self.config),
             "window": self.window,
             "portfolio": self.portfolio,
+            "benchmarks": self.benchmarks,
+            "configurations_tried": self.configurations_tried,
+            "trials_recorded": self.trials_recorded,
             "metrics": self.metrics,
         }
 
@@ -64,6 +77,15 @@ class RunRecord:
             "start_month": self.config.start_month,
             "end_month": self.config.end_month,
             "cost_bps_per_side": self.config.cost_bps_per_side,
+            "configurations_tried": self.configurations_tried,
+            "trials_recorded": self.trials_recorded,
+            # Whether the run cleared ADR-0005's hurdle, so the log answers "did
+            # any of these beat holding Bitcoin" without opening every result.
+            **(
+                {"clears_deployment_hurdle": self.benchmarks["deployment_hurdle"]["clears"]}
+                if "deployment_hurdle" in self.benchmarks
+                else {}
+            ),
             # The headline shape of the portfolio, so the log answers "how much
             # did this one trade" without opening the result file. The full
             # block, halt exits and all, stays in the result.

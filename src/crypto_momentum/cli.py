@@ -37,6 +37,7 @@ from crypto_momentum.runner import (
 )
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars
 from crypto_momentum.sim.cross_sectional import NotEnoughHistory, SelectionError
+from crypto_momentum.sim.report import PROFITABILITY_T_BAR
 from crypto_momentum.sim.universe_policy import PolicyError
 from crypto_momentum.trials import read_trials
 
@@ -120,8 +121,15 @@ def _run(config_path: Path, workspace: Workspace) -> int:
     record = run_config(config_path, workspace, run_at_utc=run_at_utc)
     print(json.dumps(record.to_dict(), indent=2, sort_keys=True))
     # The result JSON is the machine's copy and stays alone on stdout; the
-    # reporting block's liquidation line is for the researcher reading along.
-    print(f"liquidation: {_describe_liquidation(record.metrics)}", file=sys.stderr)
+    # reporting block is written beside it for the researcher reading along.
+    for line in (
+        f"liquidation: {_describe_liquidation(record.metrics)}",
+        f"profitability: {_describe_profitability(record.metrics)}",
+        f"means: {_describe_divergence(record.metrics)}",
+        f"hurdle: {_describe_hurdle(record.benchmarks)}",
+        f"configurations tried: {record.configurations_tried}",
+    ):
+        print(line, file=sys.stderr)
     if record.working_tree_dirty:
         print(
             "warning: the working tree was dirty, so this result is not "
@@ -198,6 +206,74 @@ def _describe_liquidation(reported: dict) -> str:
         return "none"
     plural = "" if len(dates) == 1 else "s"
     return f"{len(dates)} event{plural} — {', '.join(dates)}"
+
+
+def _describe_profitability(reported: dict) -> str:
+    """The statistic that decides, as ADR-0002 has it: mean log return at t > 3.0.
+
+    Quoted with its bandwidth, because a t-statistic without the lag count behind
+    it is not something a later run can be compared to.
+    """
+    mean_log = reported.get("mean_log_return_daily_net")
+    t_statistic = reported.get("mean_log_return_t_stat")
+    if t_statistic is None:
+        return (
+            "no t-statistic — the path has no finite mean log return to test "
+            f"(mean log return {mean_log})"
+        )
+    # The verdict is read off the result rather than re-derived here, so the bar
+    # is applied in exactly one place and moving it moves both.
+    verdict = "clears" if reported.get("clears_profitability_bar") else "below"
+    # The number of marks is quoted because the estimator carries no small-sample
+    # correction: on a short window the standard error is biased down and the
+    # t-statistic up, towards clearing. A reader cannot weigh that without T.
+    return (
+        f"mean log return {mean_log:.6f}/day, t = {t_statistic:.2f} "
+        f"(Newey-West, {reported.get('newey_west_lags')} lags, "
+        f"{reported.get('n_marks')} marks) — "
+        f"{verdict} the t > {PROFITABILITY_T_BAR} bar"
+    )
+
+
+def _describe_divergence(reported: dict) -> str:
+    """Whether the two means disagree in sign — ADR-0002 asks for this out loud.
+
+    A positive mean return on a negative mean log return is a strategy that
+    tests significant while losing money compounded, so it is stated rather than
+    left for a reader to spot in two adjacent numbers.
+    """
+    mean_return = reported.get("mean_return_daily_net")
+    mean_log = reported.get("mean_log_return_daily_net")
+    if mean_log is None:
+        # The most extreme divergence there is — a path that compounds to
+        # nothing has no mean log return at all — so it is said, not skipped.
+        return (
+            f"mean return {mean_return} has no mean log return to be compared "
+            "with: the run was liquidated, and a wipeout compounds to nothing "
+            "whatever its mean return says"
+        )
+    if not reported.get("mean_return_sign_divergence"):
+        return f"mean return {mean_return} and mean log return {mean_log} agree in sign"
+    return (
+        f"mean return {mean_return} and mean log return {mean_log} disagree in "
+        "sign — the log return governs, and the divergence is diagnostic of the "
+        "tail behaviour that kills these strategies"
+    )
+
+
+def _describe_hurdle(benchmarks: dict) -> str:
+    """ADR-0005's three conditions, and which of them a run failed on."""
+    hurdle = benchmarks.get("deployment_hurdle")
+    if hurdle is None:
+        return "not recorded"
+    conditions = ("sharpe_above_btc", "drawdown_no_worse_than_btc", "clears_profitability_bar")
+    if hurdle.get("clears"):
+        return (
+            "cleared — better Sharpe than BTC, no worse drawdown, and "
+            f"t > {PROFITABILITY_T_BAR}"
+        )
+    failed = [name for name in conditions if hurdle.get(name) is not True]
+    return f"not cleared — {', '.join(failed)}"
 
 
 if __name__ == "__main__":  # pragma: no cover
