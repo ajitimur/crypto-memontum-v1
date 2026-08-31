@@ -101,7 +101,8 @@ def _build_derived(config_path: Path, workspace: Workspace) -> int:
 
 def _trials(workspace: Workspace) -> int:
     trials = read_trials(workspace.trials_path)
-    print(f"{len(trials)} configurations tried")
+    plural = "" if len(trials) == 1 else "s"
+    print(f"{len(trials)} configuration{plural} tried")
     for trial in trials:
         print(
             f"  {trial.get('run_at_utc')}  {trial.get('config_name')}  "

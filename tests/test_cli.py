@@ -47,3 +47,10 @@ def test_trials_reports_how_many_configurations_were_tried(tmp_path, capsys):
 def test_trials_on_a_repository_that_has_never_run_reports_zero(tmp_path, capsys):
     assert main(["--repo-root", str(tmp_path), "trials"]) == 0
     assert "0 configurations tried" in capsys.readouterr().out
+
+
+def test_a_single_trial_is_reported_in_the_singular(tmp_path, capsys):
+    append_trial(tmp_path / "trials.jsonl", {"config_name": "only", "net_return": 0.1})
+
+    assert main(["--repo-root", str(tmp_path), "trials"]) == 0
+    assert "1 configuration tried" in capsys.readouterr().out
