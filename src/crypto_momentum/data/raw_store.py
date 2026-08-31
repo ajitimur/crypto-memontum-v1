@@ -7,16 +7,24 @@ write over an existing file, and every stored file is left read-only.
 Each file gets a JSON manifest sidecar recording the five things the protocol
 asks us to record per raw source — venue, symbol convention, bar close
 convention, timezone, and the exact window fetched — plus the verified digest.
+
+The write-once mechanism itself lives in `crypto_momentum.data.immutable`, which
+the CoinMarketCap panel shares.
 """
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 from typing import Any
 
 from crypto_momentum.data.binance_archive import ArchiveFile
+from crypto_momentum.data.immutable import (
+    RawArtifactAlreadyStored,
+    RawArtifactMissing,
+    manifest_path,
+    read_manifest,
+    write_immutable,
+)
 
 VENUE = "binance-spot"
 SYMBOL_CONVENTION = "base+quote concatenated, uppercase"
@@ -24,14 +32,13 @@ BAR_CLOSE_CONVENTION = "index is bar open_time; bar covers open_time to next ope
 TIMEZONE = "UTC"
 
 _PARTITION = "binance/spot/monthly/klines"
-_READ_ONLY = 0o444
 
 
-class RawWindowAlreadyStored(Exception):
+class RawWindowAlreadyStored(RawArtifactAlreadyStored):
     """A window already in `data/raw/` was fetched again. Raw data is append-only."""
 
 
-class RawWindowMissing(Exception):
+class RawWindowMissing(RawArtifactMissing):
     """A window was read before it was fetched."""
 
 
@@ -73,31 +80,23 @@ class RawStore:
                 "Raw data is append-only; delete it deliberately or investigate "
                 "why the window was fetched twice."
             )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
-        self._manifest_path(path).write_text(
-            json.dumps(
-                {
-                    "venue": VENUE,
-                    "symbol": archive_file.symbol,
-                    "symbol_convention": SYMBOL_CONVENTION,
-                    "interval": archive_file.interval,
-                    "month": archive_file.month,
-                    "timezone": TIMEZONE,
-                    "bar_close_convention": BAR_CLOSE_CONVENTION,
-                    "url": archive_file.url,
-                    "sha256": sha256,
-                    "fetched_at_utc": fetched_at_utc,
-                    "bytes": len(payload),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
+        return write_immutable(
+            path,
+            payload,
+            {
+                "venue": VENUE,
+                "symbol": archive_file.symbol,
+                "symbol_convention": SYMBOL_CONVENTION,
+                "interval": archive_file.interval,
+                "month": archive_file.month,
+                "timezone": TIMEZONE,
+                "bar_close_convention": BAR_CLOSE_CONVENTION,
+                "url": archive_file.url,
+                "sha256": sha256,
+                "fetched_at_utc": fetched_at_utc,
+                "bytes": len(payload),
+            },
         )
-        os.chmod(path, _READ_ONLY)
-        os.chmod(self._manifest_path(path), _READ_ONLY)
-        return path
 
     def read(self, archive_file: ArchiveFile) -> bytes:
         path = self.path_for(archive_file)
@@ -108,11 +107,7 @@ class RawStore:
         return path.read_bytes()
 
     def manifest(self, archive_file: ArchiveFile) -> dict[str, Any]:
-        path = self._manifest_path(self.path_for(archive_file))
-        if not path.exists():
+        path = self.path_for(archive_file)
+        if not manifest_path(path).exists():
             raise RawWindowMissing(f"no manifest for {archive_file.filename}")
-        return json.loads(path.read_text())
-
-    @staticmethod
-    def _manifest_path(path: Path) -> Path:
-        return path.with_suffix(path.suffix + ".manifest.json")
+        return read_manifest(path)

@@ -1,0 +1,54 @@
+# Hand-resolved CoinMarketCap id to Binance base links.
+#
+# Most of the mapping derives from the panel: CoinMarketCap records renames, so
+# an id whose symbol changes produces two non-overlapping spells on its own.
+# This file is for the cases where that is not enough, and every entry needs a
+# `reason` saying what went wrong without it.
+#
+# Naming a cmc_id here discards every derived link for that id, so each entry
+# must describe the asset's whole life, not just the disputed stretch.
+#
+# Dates are bare TOML dates in UTC. `valid_from` is inclusive, `valid_until`
+# exclusive; omit `valid_until` while the link is current.
+
+# --- Terra: one ticker, two chains ---------------------------------------
+#
+# The panel does record this rename, but it records it on its own snapshot
+# grid. Binance is the venue we trade, and Binance cut over on 2022-05-31: on
+# that date LUNAUSDT stopped being the original chain and started being Terra
+# 2.0, while the original chain resumed as LUNCUSDT. Pinning the boundary to
+# the venue's date rather than the vendor's snapshot means the bar that fills
+# an order is the bar the market cap describes.
+
+[[link]]
+cmc_id = 4172
+name = "Terra Classic"
+binance_base = "LUNA"
+valid_from = 2019-07-26     # CoinMarketCap's listing date for id 4172
+valid_until = 2022-05-31
+reason = "LUNAUSDT was the original Terra chain until Binance's 2022-05-31 rename."
+
+[[link]]
+cmc_id = 4172
+name = "Terra Classic"
+binance_base = "LUNC"
+valid_from = 2022-05-31
+reason = "The original chain continued as LUNCUSDT after the rename."
+
+[[link]]
+cmc_id = 20314
+name = "Terra"
+binance_base = "LUNA"
+valid_from = 2022-05-31
+reason = """Terra 2.0 took over the LUNAUSDT ticker on its 2022-05-31 listing. \
+Collapsing it into id 4172 would splice a 99.99% collapse onto a fresh listing \
+and hand the 2022 cross-section a return that no position could have earned."""
+
+# --- Known and not yet resolved ------------------------------------------
+#
+# Binance quoted Bitcoin Cash as BCC before renaming it to BCH, while
+# CoinMarketCap's BCC (id 827) is BitConnect — a different asset that died in
+# January 2018. The two windows overlap. Nothing is written here yet because
+# the archive's own base list is not built until the universe ticket; when it
+# is, `build_symbol_map` will raise `AmbiguousTicker` on BCC and the resolution
+# belongs in this file. The failure is loud by construction, which is the point.
