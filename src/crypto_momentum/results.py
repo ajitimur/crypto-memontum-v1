@@ -417,6 +417,18 @@ class GateRecord:
     faithful_config_name: str
     venue_config_name: str
     universe_bracket: dict[str, Any] = field(default_factory=dict)
+    # What each run was priced in, per run. The gate quotes net Sharpes and a
+    # net Sharpe gap, and `CLAUDE.md`'s Net invariant is that a figure without
+    # its cost assumption is not a result. The sibling `grid.json` carries it
+    # too, but this is the file a reader opens for the verdict, so the
+    # assumption travels with the number rather than one directory away.
+    costs: dict[str, Any] = field(default_factory=dict)
+    # The window each run actually covered and the floor its price source
+    # imposes. Issue #11 asks for the Venue Run's 2017-08-17 archive floor
+    # "stated in the result rather than footnoted", and a footnote is exactly
+    # what a comment in a config file is. The floor is why the two runs do not
+    # cover the same sample, which is why the gap between them exists at all.
+    windows: dict[str, Any] = field(default_factory=dict)
 
     @property
     def passes(self) -> bool:
@@ -431,6 +443,8 @@ class GateRecord:
             "passes": self.passes,
             "faithful_config_name": self.faithful_config_name,
             "venue_config_name": self.venue_config_name,
+            "windows": self.windows,
+            "costs": self.costs,
             "universe_bracket": self.universe_bracket,
             "faithful": self.faithful,
             "venue": self.venue,

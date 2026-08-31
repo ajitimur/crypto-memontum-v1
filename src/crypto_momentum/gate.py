@@ -202,7 +202,7 @@ def evaluate_gate(
     n_compared = len(comparable)
 
     criteria = (
-        _spearman_criterion(comparable, n_compared),
+        _spearman_criterion(comparable),
         _liquidation_criterion(ours, leg),
         _sign_agreement_criterion(ours, published),
         _level_criterion(ours, run=run),
@@ -252,9 +252,7 @@ def _aligned_with_grid(
     return tuple(by_cell[cell] for cell in HAN_KANG_RYU_21)
 
 
-def _spearman_criterion(
-    comparable: Sequence[tuple[float, float]], n_compared: int
-) -> Criterion:
+def _spearman_criterion(comparable: Sequence[tuple[float, float]]) -> Criterion:
     """The shape criterion: do we rank the 21 cells as the paper ranks them.
 
     Rank rather than level, because the Venue Run's prices and window make a
@@ -263,6 +261,7 @@ def _spearman_criterion(
     ordering of 21 cannot.
     """
     n_cells = len(HAN_KANG_RYU_21)
+    n_compared = len(comparable)
     if n_compared < n_cells:
         return Criterion(
             name=SPEARMAN,
@@ -326,10 +325,11 @@ def _sign_agreement_criterion(
 
     Table 14 reports no t-statistic per cell — its columns are mean return,
     standard deviation, Sharpe, cumulative return and maximum drawdown — so the
-    published side of this comparison is the sign of the annualised mean return,
-    which is the sign a t-statistic on that mean would carry. Stated here
-    because a reader who assumes a published t-statistic exists would be reading
-    the criterion as stricter than it is.
+    published side of this comparison is inferred. It is inferred from the
+    *cumulative* return, via `PublishedCell.log_return_is_positive`, and not from
+    the annualised mean return, because the criterion is about log returns and
+    those two columns disagree in sign on seven of the long-short cells. Taking
+    the sign off the mean would call a wiped-out portfolio positive.
 
     A cell with no t-statistic — a liquidated path has no finite mean log return
     to test — counts as disagreement rather than being dropped. Dropping it
@@ -343,10 +343,13 @@ def _sign_agreement_criterion(
         if t_statistic is None:
             unreadable += 1
             continue
-        if (t_statistic > 0.0) == (entry.mean_return_pct > 0.0):
+        if (t_statistic > 0.0) == entry.log_return_is_positive:
             agreed += 1
     n_cells = len(published)
-    note = f"{agreed} of {n_cells} cells agree in sign with the published mean return"
+    note = (
+        f"{agreed} of {n_cells} cells agree in sign with the published "
+        "cumulative return, which is the sign their mean log return carries"
+    )
     if unreadable:
         note += (
             f"; {unreadable} produced no t-statistic and so cannot agree — a "

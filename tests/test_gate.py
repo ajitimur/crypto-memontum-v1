@@ -118,13 +118,15 @@ def cells_tracking(leg, *, sharpe_offset=0.0, t_sign=1.0):
     """21 cells whose Sharpes rank exactly as the published leg's do.
 
     The published Sharpe plus a constant, so the rank correlation is 1.0 by
-    construction and a test can move one thing at a time.
+    construction and a test can move one thing at a time. Each cell's
+    t-statistic takes the sign the published cell's mean *log* return carries,
+    so a grid built this way tracks the leg on shape and on sign both.
     """
     return tuple(
         cell_record(
             published.cell,
             sharpe=published.sharpe + sharpe_offset,
-            t_stat=t_sign * abs(published.mean_return_pct) / 30.0,
+            t_stat=t_sign * (1.0 if published.log_return_is_positive else -1.0),
         )
         for published in published_leg(leg)
     )
@@ -259,12 +261,34 @@ def test_the_long_only_leg_publishes_no_liquidations_at_all():
 
 
 def test_sign_agreement_counts_cells_whose_t_statistic_matches_the_published_sign():
-    cells = cells_tracking(LONG_SHORT, t_sign=1.0)
+    cells = cells_tracking(LONG_SHORT)
     verdict = evaluate_gate(cells, run=FAITHFUL, leg=LONG_SHORT)
-    # Their (3, 21) long-short mean return is negative; every other cell of the
-    # leg is positive, so an all-positive grid agrees on 20 of 21.
-    assert verdict.criterion("t_statistic_sign_agreement").observed == 20
+
+    assert verdict.criterion("t_statistic_sign_agreement").observed == 21
     assert verdict.criterion("t_statistic_sign_agreement").passed
+
+
+def test_the_published_sign_comes_from_the_cumulative_and_not_the_mean_return():
+    """The criterion is about *log* returns, and the paper's two columns
+    disagree in sign on seven of the twenty-one long-short cells.
+
+    Their (5, 21) cell publishes a mean return of +194.01% against a cumulative
+    of -100.0%: a portfolio that was wiped out. Reading the sign off the mean
+    would call that cell positive, which is the fat-tailed path ADR-0002 exists
+    to catch. So an all-positive grid agrees on 14 of 21, not on 20.
+    """
+    published = published_leg(LONG_SHORT)
+    all_positive = tuple(
+        cell_record(entry.cell, sharpe=entry.sharpe, t_stat=1.0) for entry in published
+    )
+    verdict = evaluate_gate(all_positive, run=FAITHFUL, leg=LONG_SHORT)
+
+    assert verdict.criterion("t_statistic_sign_agreement").observed == 14
+    assert verdict.criterion("t_statistic_sign_agreement").passed is False
+    # The seven that a mean-return reading would have got wrong.
+    negative = [entry.cell.name for entry in published if not entry.log_return_is_positive]
+    assert len(negative) == 7
+    assert "l5-h21" in negative
 
 
 def test_sign_agreement_fails_when_more_than_three_cells_disagree():

@@ -471,6 +471,14 @@ def run_gate(
             FAITHFUL: faithful_grid.universe.get("bracket_bounds", {}),
             VENUE: venue_grid.universe.get("bracket_bounds", {}),
         },
+        costs={
+            FAITHFUL: cost_metadata(faithful_config),
+            VENUE: cost_metadata(venue_config),
+        },
+        windows={
+            FAITHFUL: _gate_window(faithful_config, faithful_grid),
+            VENUE: _gate_window(venue_config, venue_grid),
+        },
     )
     path = ResultStore(workspace.results_root).write_gate(record)
     return GateOutcome(
@@ -482,6 +490,35 @@ def run_gate(
         gap=gap,
         path=path,
     )
+
+
+def _gate_window(config: RunConfig, grid: GridRecord) -> dict[str, Any]:
+    """What window this half of the gate actually covered, and what floored it.
+
+    Stated in the result rather than footnoted in a config comment. The Venue
+    Run's floor is the archive's 2017-08-17, which is seven and a half months
+    after Han, Kang and Ryu's sample opens and inside the most volatile stretch
+    of it; the Faithful Run's is the vendor panel's 2013-04-28, which is below
+    their start and therefore does not bind. Neither run covers the published
+    sample exactly — a config names months, so a window ending 2023-08 runs to
+    the 31st against their 28th — and the requested and covered dates are both
+    here so the difference is visible rather than assumed away.
+    """
+    universe = grid.universe.get("universe", {})
+    return {
+        "price_source": config.price_source,
+        "requested_start_month": config.start_month,
+        "requested_end_month": config.end_month,
+        "covered_start_ts_utc": universe.get("start_ts_utc"),
+        "covered_end_ts_utc": universe.get("end_ts_utc"),
+        # Whichever floor the price source imposes, under one key, because what
+        # a reader needs is the date below which this run could see nothing.
+        "price_source_floor_ts_utc": universe.get("archive_floor_ts_utc")
+        or universe.get("panel_floor_ts_utc"),
+        "n_dates_below_floor": universe.get("n_dates_before_archive_floor")
+        or universe.get("n_dates_before_panel_floor"),
+        "published_sample": "2017-01-01 to 2023-08-28",
+    }
 
 
 def _assert_gate_pair(faithful: RunConfig, venue: RunConfig) -> None:
@@ -514,9 +551,18 @@ def _assert_gate_pair(faithful: RunConfig, venue: RunConfig) -> None:
             f"{faithful.name} names no grid. The gate is read across the 21 "
             "cells of a published Grid, not on one cell"
         )
+    # `symbols` above all: the two configs list the cross-section by hand, and a
+    # gap between two runs that ranked different assets is a fact about the
+    # lists rather than about the prices.
     differing = [
         field
-        for field in ("strategy_kind", "quantile", "bracket", "turnover_budget_weekly")
+        for field in (
+            "symbols",
+            "strategy_kind",
+            "quantile",
+            "bracket",
+            "turnover_budget_weekly",
+        )
         if getattr(faithful, field) != getattr(venue, field)
     ]
     if differing:

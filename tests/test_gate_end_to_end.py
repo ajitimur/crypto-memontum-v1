@@ -150,6 +150,28 @@ class TestVerdict:
     def test_the_verdict_names_the_table_it_was_read_against(self, outcome):
         assert "Table 14" in outcome.record.faithful["citation"]
 
+    def test_each_run_states_the_floor_its_price_source_imposes(self, outcome):
+        """Issue #11 wants the archive floor "stated in the result rather than
+        footnoted", and a comment in a config file is a footnote."""
+        venue = outcome.record.windows[VENUE]
+        faithful = outcome.record.windows[FAITHFUL]
+
+        assert venue["price_source_floor_ts_utc"].startswith("2017-08-17")
+        assert faithful["price_source_floor_ts_utc"].startswith("2013-04-28")
+
+    def test_each_run_states_the_window_it_actually_covered(self, outcome):
+        for window in outcome.record.windows.values():
+            assert window["covered_start_ts_utc"]
+            assert window["covered_end_ts_utc"]
+            assert window["published_sample"] == "2017-01-01 to 2023-08-28"
+
+    def test_each_run_states_what_its_net_figures_are_net_of(self, outcome):
+        """A net Sharpe quoted without its cost assumption is not a result."""
+        for costs in outcome.record.costs.values():
+            assert costs["cost_model"] == "paper"
+            assert costs["total_bps_per_side"] == 15.0
+            assert costs["slippage_bps_per_side"] == 0.0
+
     def test_the_gate_is_filed_at_the_commit_s_root(self, outcome, daily_panel_workspace):
         path = (
             daily_panel_workspace.results_root
@@ -229,6 +251,22 @@ class TestThePairIsChecked:
         """Otherwise the gap between them would measure two things at once."""
         faithful, venue = configs(venue={"quantile": "0.4"})
         with pytest.raises(ConfigError, match="quantile"):
+            run_gate(
+                faithful, venue, daily_panel_workspace, run_at_utc=RUN_AT, open_url=archive
+            )
+
+    def test_two_runs_ranking_different_assets_are_refused(
+        self, daily_panel_workspace, configs, archive
+    ):
+        """A gap between runs that ranked different cross-sections is a fact
+        about the two lists, not about the prices."""
+        faithful, venue = configs()
+        venue.write_text(
+            config_text(name="gate-venue", price_source="binance-archive").replace(
+                SYMBOLS, '["BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "XRPUSDT"]'
+            )
+        )
+        with pytest.raises(ConfigError, match="symbols"):
             run_gate(
                 faithful, venue, daily_panel_workspace, run_at_utc=RUN_AT, open_url=archive
             )
@@ -325,6 +363,10 @@ class TestTheCommandLine:
         assert "gap (venue minus faithful)" in captured.err
         assert "universe bracket, both bounds" in captured.err
         assert "tokocrypto" in captured.err
+        # The floor and the cost assumption are on the printed verdict, not only
+        # in the JSON — a footnote in a config file is not "stated in the result".
+        assert "floor 2017-08-17" in captured.err
+        assert "costs: paper at 15.0bp per side" in captured.err
 
 
 def _archive_reader():

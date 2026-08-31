@@ -13,9 +13,9 @@ comparison would flatter the run by exactly their 15bp.
 
 **All three legs, and also deliberately.** ADR-0004 makes this repo long-only,
 so `LONG_ONLY` is the column our simulator is like-for-like with; ADR-0003 fixes
-the gate's tolerances against `LONG_SHORT`. The two disagree — see
-`gate.ReferenceLeg` — and that disagreement is only visible if both columns are
-here to be read. `SHORT_ONLY` is carried because it is what makes the other two
+the gate's tolerances against `LONG_SHORT`. The two disagree — see the `leg`
+argument to `gate.evaluate_gate` and the module docstring above it — and that
+disagreement is only visible if both columns are here to be read. `SHORT_ONLY` is carried because it is what makes the other two
 add up, and because a leg quietly omitted is a leg nobody can check.
 """
 
@@ -81,6 +81,25 @@ class PublishedCell:
     def liquidated(self) -> bool:
         """Whether the published portfolio was wiped out during their sample."""
         return self.cum_return_pct <= LIQUIDATED_CUM_RETURN_PCT
+
+    @property
+    def log_return_is_positive(self) -> bool:
+        """The sign a mean *log* return of this cell would carry.
+
+        Read off the cumulative return and not off `mean_return_pct`, because
+        those two disagree in sign on seven of the long-short cells and the
+        disagreement is the whole point of ADR-0002. Cumulative return is the
+        compounded quantity: sign(log(1 + cum)) is sign(cum), so a portfolio that
+        ended below where it started has a negative mean log return whatever its
+        arithmetic mean says.
+
+        Their (5, 21) long-short cell is the case that makes this matter — mean
+        return +194.01% against a cumulative -100.0%. Taking the sign off the
+        mean would call that cell positive, which is exactly the fat-tailed path
+        that tests significant while losing money, and exactly the reading the
+        log-return bar exists to prevent.
+        """
+        return self.cum_return_pct > 0.0
 
 
 # (j, k) -> (L row, S row, LS row), each (Mean, Std, Sharpe, Cum, MDD).

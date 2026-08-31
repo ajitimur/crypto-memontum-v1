@@ -7,7 +7,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from crypto_momentum.config import ConfigError, load_config
 from crypto_momentum.data.binance_archive import ChecksumMismatch, MalformedArchiveFile
@@ -261,6 +261,17 @@ def _gate(
             f"{run_verdict.n_cells_compared} of 21 cells comparable",
             file=sys.stderr,
         )
+        # The window and the cost assumption before the numbers they qualify: a
+        # net Sharpe without its cost model is not a result (`CONTEXT.md`, Net),
+        # and the archive floor is why the two runs do not cover one sample.
+        print(
+            f"  {_describe_window(outcome.record.windows.get(run_verdict.run, {}))}",
+            file=sys.stderr,
+        )
+        print(
+            f"  {_describe_costs(outcome.record.costs.get(run_verdict.run, {}))}",
+            file=sys.stderr,
+        )
         for criterion in run_verdict.criteria:
             print(f"  {_describe_criterion(criterion)}", file=sys.stderr)
         for warning in run_verdict.warnings:
@@ -276,6 +287,46 @@ def _gate(
             file=sys.stderr,
         )
     return 0 if outcome.passes else EXIT_GATE_FAILED
+
+
+def _describe_window(window: dict[str, Any]) -> str:
+    """The window covered and the floor that bounded it, in the result itself.
+
+    Issue #11 asks for the Venue Run's 2017-08-17 archive floor "stated in the
+    result rather than footnoted", and a comment in a config file is a footnote.
+    The published sample is printed beside it so the shortfall is read rather
+    than worked out.
+    """
+    if not window:
+        return "window: not recorded"
+    covered = f"{_date(window.get('covered_start_ts_utc'))} to {_date(window.get('covered_end_ts_utc'))}"
+    floor = _date(window.get("price_source_floor_ts_utc"))
+    below = window.get("n_dates_below_floor")
+    shortfall = "" if not below else f", {below} dates below it"
+    return (
+        f"window: {covered} on {window.get('price_source')} prices "
+        f"(floor {floor}{shortfall}); published sample "
+        f"{window.get('published_sample')}"
+    )
+
+
+def _describe_costs(costs: dict[str, Any]) -> str:
+    """What the run's net figures are net *of* — the Net invariant, on the line.
+
+    A Sharpe quoted without its cost assumption is not a result, so the
+    assumption is printed with the criteria rather than left in the JSON.
+    """
+    if not costs:
+        return "costs: not recorded"
+    return (
+        f"costs: {costs.get('cost_model')} at {costs.get('total_bps_per_side')}bp "
+        f"per side, slippage {costs.get('slippage_bps_per_side')}bp, "
+        f"{costs.get('funding')}"
+    )
+
+
+def _date(timestamp: str | None) -> str:
+    return "—" if not timestamp else timestamp[:10]
 
 
 def _describe_criterion(criterion: Criterion) -> str:
@@ -315,7 +366,7 @@ def _describe_gap(gap: RunGap) -> str:
     )
 
 
-def _describe_bracket(bracket: dict) -> str:
+def _describe_bracket(bracket: dict[str, Any]) -> str:
     """The Universe as both bounds, never as one chosen number.
 
     A count quoted on one bound alone has chosen which listing risk to show, and
