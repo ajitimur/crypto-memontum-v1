@@ -42,6 +42,14 @@ NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 SUPPORTED_VENUES = ("binance-spot",)
 SUPPORTED_INTERVALS = ("1d",)
 
+# Where the run's prices come from. ADR-0008 buys both: the Binance archive is
+# what we would actually trade against, and the CoinMarketCap panel is the only
+# thing that reaches back to Han et al.'s 2017-01-01 start — the archive floor
+# is 2017-08-17. The Replication Gate runs one of each and reports the gap.
+BINANCE_ARCHIVE = "binance-archive"
+CMC_PANEL = "cmc-panel"
+PRICE_SOURCES = (BINANCE_ARCHIVE, CMC_PANEL)
+
 BUY_AND_HOLD = "buy_and_hold"
 CROSS_SECTIONAL = "cross_sectional"
 SUPPORTED_STRATEGIES = (BUY_AND_HOLD, CROSS_SECTIONAL)
@@ -62,7 +70,15 @@ _STRATEGY_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 _SCHEMA: dict[str, tuple[str, ...]] = {
-    "data": ("venue", "symbol", "symbols", "interval", "start_month", "end_month"),
+    "data": (
+        "venue",
+        "price_source",
+        "symbol",
+        "symbols",
+        "interval",
+        "start_month",
+        "end_month",
+    ),
     "strategy": ("kind", *_STRATEGY_KEYS[CROSS_SECTIONAL]),
     "universe": ("bracket", "liquidity_floor_usd", "liquidity_window_days"),
     "costs": ("model", "slippage_bps_per_side", "turnover_budget_weekly"),
@@ -98,6 +114,11 @@ class RunConfig:
     # Exactly one of the two is set, so `universe_symbols` is the only thing
     # downstream code has to look at.
     symbols: tuple[str, ...] = ()
+    # Where the bars come from. Named rather than inferred from the window: a run
+    # that silently switched vendor because its start month sat below the archive
+    # floor would produce a Faithful Run under a Venue Run's name, and the two
+    # are different tests. Defaulted to the archive, which is what we trade.
+    price_source: str = BINANCE_ARCHIVE
     # The run's own turnover budget, at or below ADR-0007's weekly ceiling. A
     # config may budget tighter than the ceiling; it may not budget looser, and
     # the loader refuses one that tries before any bar is fetched.
@@ -198,6 +219,9 @@ def load_config(path: Path | str) -> RunConfig:
     costs = _require_table(document, "costs")
 
     venue = _require_choice(data, "venue", "data.venue", SUPPORTED_VENUES)
+    price_source = _require_choice_or(
+        data, "price_source", "data.price_source", PRICE_SOURCES, BINANCE_ARCHIVE
+    )
     strategy_kind = _require_choice(strategy, "kind", "strategy.kind", SUPPORTED_STRATEGIES)
     _reject_foreign_strategy_keys(strategy, strategy_kind)
     symbol, symbols = _require_symbols(data, strategy_kind)
@@ -213,6 +237,7 @@ def load_config(path: Path | str) -> RunConfig:
     config = RunConfig(
         name=name,
         venue=venue,
+        price_source=price_source,
         symbol=symbol,
         symbols=symbols,
         interval=interval,

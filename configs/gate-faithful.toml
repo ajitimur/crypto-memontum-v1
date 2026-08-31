@@ -1,0 +1,105 @@
+# The Replication Gate, Faithful Run — ADR-0003's amendment.
+#
+# Han, Kang and Ryu's own vendor and their own window, so that vendor differences
+# are eliminated as an explanation for disagreement. This is the gate proper: it
+# tests whether *our pipeline is correct*, and if it fails nothing downstream
+# means anything.
+#
+# Run it against `configs/gate-venue.toml`:
+#
+#   momentum gate configs/gate-faithful.toml configs/gate-venue.toml
+#
+# Three things a reader has to know before quoting anything this produces.
+#
+# 1. **It needs a daily panel, and ADR-0008's stored one is weekly.** The
+#    one-time pull runs at `--interval 7d`. `data/cmc_prices.py` refuses a panel
+#    coarser than daily rather than resampling it — filling six days in seven
+#    would invent prices the vendor never published, and ADR-0001 exists because
+#    what happens *inside* a holding period is what liquidates a portfolio. Until
+#    the panel is re-pulled at a daily interval this config cannot run, and that
+#    refusal is the correct behaviour rather than a bug.
+#
+# 2. **The cross-section is the Binance USDT book, not CoinMarketCap's.** Han et
+#    al. rank every coin the vendor lists; `data.symbols` below is the set of
+#    venue pairs we can also price on the archive, which is what makes the Venue
+#    Run comparable with this one. It is the largest remaining comparability gap
+#    and it will cost the gate some rank correlation. Widening the list widens
+#    both runs together or neither.
+#
+# 3. **Long-only, per ADR-0004.** The published leg the verdict is read against
+#    is `--reference-leg`'s, and ADR-0003 fixes its tolerances on the long-short
+#    leg while ADR-0004 leaves an unlevered long-only book unable to liquidate at
+#    all. See the module docstring in `src/crypto_momentum/gate.py`.
+
+name = "gate-faithful"
+
+[data]
+venue = "binance-spot"
+# The Faithful Run's whole point. The Binance archive floor is 2017-08-17 and
+# the paper's sample opens 2017-01-01, so no archive-priced run can cover it.
+price_source = "cmc-panel"
+interval = "1d"
+# Han, Kang and Ryu's exact sample: 2017-01-01 to 2023-08-28. The window sits
+# entirely inside the Development Sample, so running it spends none of the
+# Holdout.
+start_month = "2017-01"
+end_month = "2023-08"
+
+# The venue pairs the gate ranks, listed by hand rather than enumerated, so that
+# both runs see one list and neither can quietly widen. Delisted and collapsed
+# names are here on purpose — LUNA, FTT, SRM, WAVES — because a Universe drawn
+# from what Binance lists today is the survivorship bias `CLAUDE.md` forbids;
+# `policy/exclusions-v1.toml` remains the authority on Stablecoins and Wrapped
+# Assets, and removes anything here that it classifies.
+symbols = [
+  "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
+  "DOGEUSDT", "SOLUSDT", "DOTUSDT", "MATICUSDT", "LTCUSDT",
+  "TRXUSDT", "AVAXUSDT", "LINKUSDT", "ATOMUSDT", "XLMUSDT",
+  "BCHUSDT", "ETCUSDT", "XMRUSDT", "ALGOUSDT", "VETUSDT",
+  "FILUSDT", "ICPUSDT", "EOSUSDT", "AAVEUSDT", "NEOUSDT",
+  "THETAUSDT", "XTZUSDT", "IOTAUSDT", "DASHUSDT", "ZECUSDT",
+  "MKRUSDT", "COMPUSDT", "SNXUSDT", "SUSHIUSDT", "YFIUSDT",
+  "UNIUSDT", "CRVUSDT", "1INCHUSDT", "ZRXUSDT", "BATUSDT",
+  "ENJUSDT", "MANAUSDT", "SANDUSDT", "AXSUSDT", "CHZUSDT",
+  "GRTUSDT", "RUNEUSDT", "KAVAUSDT", "ZILUSDT", "ONTUSDT",
+  "QTUMUSDT", "OMGUSDT", "KSMUSDT", "EGLDUSDT", "NEARUSDT",
+  "FTMUSDT", "HBARUSDT", "ONEUSDT", "CELRUSDT", "ANKRUSDT",
+  "LUNAUSDT", "FTTUSDT", "SRMUSDT", "WAVESUSDT", "RAYUSDT",
+]
+
+[strategy]
+kind = "cross_sectional"
+# The published grid, by name. All 21 cells or none — the gate's rank
+# correlation is a statement about the shape, and 0.70 across some other number
+# of cells is a bar nobody agreed to.
+grid = "han-kang-ryu-21"
+# Their quintile sort. Table 14 reports the full cross-section sorted into
+# quintiles, which is what this compares against; the 21 pairs themselves were
+# chosen on a top-5% criterion, and that mismatch is a known cost to the rank
+# correlation rather than a pipeline fault.
+quantile = 0.2
+
+[universe]
+# The upper bound. `momentum gate` reports the lower bound beside it either way
+# — a Universe quoted on one bound alone has chosen which listing risk to show.
+bracket = "binance-full"
+
+[costs]
+# The paper's own 15bp, not ADR-0007's Tokocrypto 40.44bp per side. The gate
+# reproduces a published *net* figure, and reproducing it under a different cost
+# world would compare two different numbers and call the difference a pipeline
+# fault. What we would actually pay is what every run after the gate is priced
+# in; this one is priced in what the table was.
+model = "paper"
+# Han et al. build slippage per coin from trading data. We have no such
+# measurement, and inventing one would be a knob. Zero here means the run is net
+# of fees only, stated rather than hidden, and the gap this leaves is in the
+# direction of flattering the result.
+slippage_bps_per_side = 0.0
+# ADR-0007's weekly Rebalance Turnover ceiling is a *deployment* constraint, and
+# ADR-0003 is explicit that Step 1 is a strategy we do not intend to trade. The
+# grid's short holding periods will breach it and those cells will be refused,
+# which leaves the gate with fewer than 21 comparable cells. That is a known
+# blocker to the gate passing and wants an ADR amendment exempting replication
+# runs, not a number quietly written here.
+turnover_budget_weekly = 0.25

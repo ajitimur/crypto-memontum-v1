@@ -15,6 +15,8 @@ from typing import Any
 import pandas as pd
 
 from crypto_momentum.config import (
+    BINANCE_ARCHIVE,
+    CMC_PANEL,
     CROSS_SECTIONAL,
     ConfigError,
     RunConfig,
@@ -22,12 +24,14 @@ from crypto_momentum.config import (
 )
 from crypto_momentum.data.binance_archive import monthly_klines_file
 from crypto_momentum.data.cmc_panel import CmcPanelStore
+from crypto_momentum.data.cmc_prices import panel_bars, panel_universe
 from crypto_momentum.data.fetch import ArchiveUnavailable, UrlOpener, fetch_archive_file
 from crypto_momentum.data.market_caps import market_cap_panel
 from crypto_momentum.data.raw_store import RawStore, RawWindowMissing
 from crypto_momentum.data.universe import (
     SymbolCoverage,
     UniverseError,
+    UniversePanel,
     bar_span_from_bars,
     build_universe_panel,
     coverage_for_symbol,
@@ -41,7 +45,16 @@ from crypto_momentum.policy import (
     policy_root,
 )
 from crypto_momentum.provenance import Provenance, describe_head
+from crypto_momentum.gate import (
+    FAITHFUL,
+    VENUE,
+    GateVerdict,
+    RunGap,
+    describe_gap,
+    evaluate_gate,
+)
 from crypto_momentum.results import (
+    GateRecord,
     RECORDED,
     REFUSED,
     TURNOVER_BUDGET_BREACHED,
@@ -71,12 +84,13 @@ from crypto_momentum.sim.cross_sectional import (
     simulate_cross_sectional,
 )
 from crypto_momentum.sim.grid import GridCell
+from crypto_momentum.sim.published import LONG_SHORT
 from crypto_momentum.sim.report import RunResult
 from crypto_momentum.sim.universe_policy import (
     TOKOCRYPTO,
     LiquidityFloor,
-    apply_universe_policy,
     dollar_volume_from_bars,
+    universe_bracket,
 )
 from crypto_momentum.trials import TRIALS_FILENAME, append_trial, read_trials
 
@@ -362,6 +376,10 @@ def run_grid(
         config_sha256=config_sha256,
         config_path=relative_path,
         cells=tuple(cells),
+        # The one Universe all 21 cells ran on, recorded at the level it belongs
+        # to. It carries both bracket bounds, which is what issue #11 asks the
+        # gate to report rather than a single chosen number.
+        universe=cross_section.universe_metadata,
         # Read off the log after the last cell, so the count is what the log
         # says rather than what the grid assumed it would say.
         **counts_recorded(
@@ -370,6 +388,194 @@ def run_grid(
     )
     ResultStore(workspace.results_root).write_grid(grid_record)
     return grid_record
+
+
+@dataclass(frozen=True)
+class GateOutcome:
+    """What one invocation of the Replication Gate produced.
+
+    The two grids are returned beside the record because the caller printing the
+    table wants the cells, and re-reading them off disk to draw a table it just
+    computed would be a second source of truth for the same run.
+    """
+
+    record: GateRecord
+    faithful_grid: GridRecord
+    venue_grid: GridRecord
+    faithful: GateVerdict
+    venue: GateVerdict
+    gap: RunGap
+    path: Path
+
+    @property
+    def passes(self) -> bool:
+        return self.record.passes
+
+
+def run_gate(
+    faithful_config_path: Path | str,
+    venue_config_path: Path | str,
+    workspace: Workspace,
+    *,
+    run_at_utc: str,
+    leg: str = LONG_SHORT,
+    open_url: UrlOpener | None = None,
+) -> GateOutcome:
+    """Run both halves of the Replication Gate and record an explicit verdict.
+
+    ADR-0003's Step 1, whole: the Faithful Run on the paper's own vendor and
+    window, the Venue Run on the archive prices of the venue we would trade, both
+    read against the published table on tolerances fixed before either ran, and
+    the gap between them reported as a result in its own right.
+
+    Both grids run before either is judged. Judging the first and stopping on a
+    failure would leave the gap — the number nobody in the surveyed literature
+    reports — unmeasured exactly when it is most interesting, which is when the
+    two runs disagree.
+
+    The two configs must name the same Grid and differ in their price source;
+    anything else is not the comparison this gate makes, and is refused rather
+    than run and reported under the gate's name.
+    """
+    faithful_config = load_config(faithful_config_path)
+    venue_config = load_config(venue_config_path)
+    _assert_gate_pair(faithful_config, venue_config)
+
+    faithful_grid = run_grid(
+        faithful_config_path, workspace, run_at_utc=run_at_utc, open_url=open_url
+    )
+    venue_grid = run_grid(
+        venue_config_path, workspace, run_at_utc=run_at_utc, open_url=open_url
+    )
+
+    faithful = evaluate_gate(faithful_grid.cells, run=FAITHFUL, leg=leg)
+    venue = evaluate_gate(venue_grid.cells, run=VENUE, leg=leg)
+    gap = describe_gap(faithful, venue)
+
+    provenance = describe_head(workspace.repo_root)
+    record = GateRecord(
+        commit=provenance.commit,
+        working_tree_dirty=provenance.working_tree_dirty,
+        run_at_utc=run_at_utc,
+        leg=leg,
+        faithful=faithful.to_dict(),
+        venue=venue.to_dict(),
+        gap=gap.to_dict(),
+        faithful_config_name=faithful_config.name,
+        venue_config_name=venue_config.name,
+        # Both ends, per run. Issue #11 asks for the bracket as bounds rather
+        # than as a single chosen number, and the two runs do not see the same
+        # Universe — the Venue Run starts at the archive floor — so reporting one
+        # pair of bounds for both would be reporting a Universe neither had.
+        universe_bracket={
+            FAITHFUL: faithful_grid.universe.get("bracket_bounds", {}),
+            VENUE: venue_grid.universe.get("bracket_bounds", {}),
+        },
+        costs={
+            FAITHFUL: cost_metadata(faithful_config),
+            VENUE: cost_metadata(venue_config),
+        },
+        windows={
+            FAITHFUL: _gate_window(faithful_config, faithful_grid),
+            VENUE: _gate_window(venue_config, venue_grid),
+        },
+    )
+    path = ResultStore(workspace.results_root).write_gate(record)
+    return GateOutcome(
+        record=record,
+        faithful_grid=faithful_grid,
+        venue_grid=venue_grid,
+        faithful=faithful,
+        venue=venue,
+        gap=gap,
+        path=path,
+    )
+
+
+def _gate_window(config: RunConfig, grid: GridRecord) -> dict[str, Any]:
+    """What window this half of the gate actually covered, and what floored it.
+
+    Stated in the result rather than footnoted in a config comment. The Venue
+    Run's floor is the archive's 2017-08-17, which is seven and a half months
+    after Han, Kang and Ryu's sample opens and inside the most volatile stretch
+    of it; the Faithful Run's is the vendor panel's 2013-04-28, which is below
+    their start and therefore does not bind. Neither run covers the published
+    sample exactly — a config names months, so a window ending 2023-08 runs to
+    the 31st against their 28th — and the requested and covered dates are both
+    here so the difference is visible rather than assumed away.
+    """
+    universe = grid.universe.get("universe", {})
+    return {
+        "price_source": config.price_source,
+        "requested_start_month": config.start_month,
+        "requested_end_month": config.end_month,
+        "covered_start_ts_utc": universe.get("start_ts_utc"),
+        "covered_end_ts_utc": universe.get("end_ts_utc"),
+        # Whichever floor the price source imposes, under one key, because what
+        # a reader needs is the date below which this run could see nothing.
+        "price_source_floor_ts_utc": universe.get("archive_floor_ts_utc")
+        or universe.get("panel_floor_ts_utc"),
+        "n_dates_below_floor": universe.get("n_dates_before_archive_floor")
+        or universe.get("n_dates_before_panel_floor"),
+        "published_sample": "2017-01-01 to 2023-08-28",
+    }
+
+
+def _assert_gate_pair(faithful: RunConfig, venue: RunConfig) -> None:
+    """That the two configs are the two halves of one gate, and not two runs.
+
+    Checked before either grid runs, because 42 cells is a long way to get before
+    finding out the comparison was never going to mean anything.
+    """
+    if faithful.price_source != CMC_PANEL:
+        raise ConfigError(
+            f"the Faithful Run is priced off the CoinMarketCap panel and "
+            f"{faithful.name} names {faithful.price_source!r}. Vendor differences "
+            "are what the Faithful Run exists to eliminate, so a Faithful Run on "
+            "venue prices tests nothing ADR-0003 asked for"
+        )
+    if venue.price_source != BINANCE_ARCHIVE:
+        raise ConfigError(
+            f"the Venue Run is priced off the Binance archive and {venue.name} "
+            f"names {venue.price_source!r} — the point of it is contact with "
+            "prices that could actually have been traded"
+        )
+    if faithful.grid != venue.grid:
+        raise ConfigError(
+            f"the two runs grid over {faithful.grid!r} and {venue.grid!r}. The "
+            "gap between them is only a fact about prices if everything else "
+            "about them is the same"
+        )
+    if faithful.grid is None:
+        raise ConfigError(
+            f"{faithful.name} names no grid. The gate is read across the 21 "
+            "cells of a published Grid, not on one cell"
+        )
+    # `symbols` above all: the two configs list the cross-section by hand, and a
+    # gap between two runs that ranked different assets is a fact about the
+    # lists rather than about the prices.
+    differing = [
+        field
+        for field in (
+            "symbols",
+            "strategy_kind",
+            "quantile",
+            "bracket",
+            "turnover_budget_weekly",
+        )
+        if getattr(faithful, field) != getattr(venue, field)
+    ]
+    if differing:
+        raise ConfigError(
+            f"the two runs differ in {', '.join(differing)} as well as in their "
+            "price source, so the gap between them would measure both at once"
+        )
+    if faithful.cost_model.name != venue.cost_model.name:
+        raise ConfigError(
+            "the two runs are priced in different cost models "
+            f"({faithful.cost_model.name} and {venue.cost_model.name}), so their "
+            "difference is a difference of costs and not of prices"
+        )
 
 
 def _recorded_cell(cell: GridCell, record: RunRecord) -> GridCellRecord:
@@ -497,20 +703,30 @@ def load_cross_section_inputs(
     coverage, narrowed to the days real bars exist for; policy removes what we
     would not consider holding; and the vendor panel supplies the weights.
 
+    A Faithful Run (`price_source = "cmc-panel"`) takes both prices and Universe
+    from the vendor panel instead — see `data/cmc_prices.py`. Only the first two
+    layers change: policy, the weights and everything above them are the same
+    code on the same shapes, which is what makes the two runs comparable at all.
+
     Nothing here reaches past the run's own window, and nothing in the simulation
     core reaches back out to a store.
     """
-    bars_by_symbol, coverages = load_cross_section(
-        config, workspace, fetched_at_utc=fetched_at_utc, open_url=open_url
-    )
-    panel = build_universe_panel(
-        coverages,
-        start=_window_start(config),
-        end=_window_end(config),
-        bar_span_by_symbol={
-            symbol: bar_span_from_bars(bars) for symbol, bars in bars_by_symbol.items()
-        },
-    )
+    caps_panel = CmcPanelStore(workspace.raw_root).read_panel()
+    if config.price_source == CMC_PANEL:
+        bars_by_symbol, panel = _panel_priced_inputs(config, caps_panel, workspace)
+    else:
+        bars_by_symbol, coverages = load_cross_section(
+            config, workspace, fetched_at_utc=fetched_at_utc, open_url=open_url
+        )
+        panel = build_universe_panel(
+            coverages,
+            start=_window_start(config),
+            end=_window_end(config),
+            bar_span_by_symbol={
+                symbol: bar_span_from_bars(bars)
+                for symbol, bars in bars_by_symbol.items()
+            },
+        )
 
     policy = policy_root(workspace.repo_root)
     floor = (
@@ -522,27 +738,61 @@ def load_cross_section_inputs(
         else None
     )
     dollar_volume = dollar_volume_from_bars(bars_by_symbol)
-    after_policy = apply_universe_policy(
+    exclusions = load_exclusion_list(policy / EXCLUSIONS_FILENAME)
+    # The lower bound of the bracket is the only one that needs a listing, but it
+    # is loaded either way so the two ends run off one artefact.
+    venue_listing = load_venue_listing(policy / TOKOCRYPTO_LISTING_FILENAME)
+    both_bounds = universe_bracket(
         panel,
-        exclusions=load_exclusion_list(policy / EXCLUSIONS_FILENAME),
-        bracket=config.bracket,
-        # The lower bound of the bracket is the only one that needs a listing,
-        # but it is loaded either way so the two ends run off one artefact.
-        venue_listing=load_venue_listing(policy / TOKOCRYPTO_LISTING_FILENAME),
+        exclusions=exclusions,
+        venue_listing=venue_listing,
         dollar_volume=dollar_volume if floor is not None else None,
         floor=floor,
     )
+    after_policy = both_bounds[config.bracket]
 
     return CrossSection(
         bars_by_symbol=bars_by_symbol,
         tradeable=after_policy.tradeable,
-        universe_metadata=after_policy.metadata,
+        # Both ends of the bracket beside the one that was selected, because a
+        # Universe quoted on one bound alone has chosen which listing risk to
+        # show and the choice is invisible in the number. Issue #11 asks the gate
+        # for both bounds; computing them here is what lets every run carry them.
+        universe_metadata={
+            **after_policy.metadata,
+            "bracket_bounds": {
+                name: bound.metadata["n_symbols_tradeable_at_some_point"]
+                for name, bound in both_bounds.items()
+            },
+        },
         market_caps=market_cap_panel(
-            CmcPanelStore(workspace.raw_root).read_panel(),
+            caps_panel,
             config.universe_symbols,
             repo_root=workspace.repo_root,
         ),
     )
+
+
+def _panel_priced_inputs(
+    config: RunConfig,
+    caps_panel: pd.DataFrame,
+    workspace: Workspace,
+) -> tuple[dict[str, pd.DataFrame], UniversePanel]:
+    """The Faithful Run's first two layers, both off the one stored panel.
+
+    Nothing is fetched: ADR-0008's pull happens once, by hand, and a run that
+    reached for the network here would be the second pull that ADR exists to
+    prevent.
+    """
+    start, end = _window_start(config), _window_end(config)
+    bars_by_symbol = panel_bars(
+        caps_panel,
+        config.universe_symbols,
+        repo_root=workspace.repo_root,
+        start=start,
+        end=end,
+    )
+    return bars_by_symbol, panel_universe(bars_by_symbol, start=start, end=end)
 
 
 def _run_cross_sectional(
