@@ -19,10 +19,51 @@ appends one line to `trials.jsonl`.
 
 ```sh
 uv run momentum grid configs/xsec-grid-2021h1.toml                  # all 21 cells, one invocation
+uv run momentum gate configs/gate-faithful.toml configs/gate-venue.toml
 uv run momentum build-derived configs/skeleton-btcusdt-2021q1.toml  # rebuild without fetching
 uv run momentum pull-cmc-panel                                      # the one-time market-cap pull
 uv run momentum trials                                              # every configuration tried
 ```
+
+## The Replication Gate
+
+`momentum gate` runs both halves of ADR-0003's Step 1 and states an explicit
+pass or fail against tolerances fixed before either ran.
+
+The **Faithful Run** (`configs/gate-faithful.toml`) prices off the CoinMarketCap
+panel over Han, Kang and Ryu's own 2017-01-01 to 2023-08-28 window, so vendor
+differences are eliminated as an explanation for disagreement. It tests whether
+our pipeline is correct, and it is the only one held to the level. The **Venue
+Run** (`configs/gate-venue.toml`) prices off the Binance archive from its
+2017-08-17 floor — stated in the result, not footnoted — and tests whether the
+published effect survives contact with executable prices.
+
+The four criteria are in `src/crypto_momentum/gate.py` and the published table
+they are read against is transcribed in `src/crypto_momentum/sim/published.py`
+beside its citation. The verdict lands at `results/<commit>/gate.json`; a
+failing gate exits 3, which is a finding and not a fault — ADR-0003 expects the
+gate to be hard to pass.
+
+**The gap between the two runs is reported as a result in its own right.** It
+measures how much of the published effect is an artefact of cross-exchange
+aggregate pricing versus what could actually have been traded on one venue.
+Nobody in the surveyed literature reports it.
+
+Three things stand between the apparatus and a verdict anyone should quote, each
+recorded where it bites rather than only here:
+
+- **The stored vendor panel is weekly.** ADR-0008's one-time pull runs at
+  `--interval 7d`, and `data/cmc_prices.py` refuses a panel too coarse to mark
+  daily rather than resampling it. The Faithful Run needs a daily re-pull.
+- **ADR-0003 and ADR-0004 disagree about which published leg to bind to.**
+  ADR-0003 fixes its tolerances on the long-short leg; ADR-0004 makes this repo
+  long-only and notes an unlevered long-only book cannot liquidate. The gate
+  runs the comparison ADR-0003 specifies, warns in the verdict, and takes
+  `--reference-leg long_only` for the like-for-like reading.
+- **ADR-0007's turnover ceiling is a deployment constraint.** ADR-0003 is
+  explicit that Step 1 is a strategy we do not intend to trade, so the grid's
+  short holding periods may be refused for breaching a ceiling that was never
+  meant to apply to a replication run.
 
 ## The Grid
 

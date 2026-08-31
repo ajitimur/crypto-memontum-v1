@@ -344,6 +344,12 @@ class GridRecord:
     cells: tuple[GridCellRecord, ...]
     configurations_tried: int = 0
     trials_recorded: int = 0
+    # The Universe all 21 cells ran on, after policy. A property of the grid and
+    # not of a cell: the cells differ in two knobs and see one Universe, which is
+    # what makes them comparable with each other. It carries `bracket_bounds`,
+    # both ends of the bracket, because a Universe quoted on one bound alone has
+    # chosen which listing risk to show.
+    universe: dict[str, Any] = field(default_factory=dict)
 
     @property
     def n_recorded(self) -> int:
@@ -378,7 +384,57 @@ class GridRecord:
             "n_liquidated": self.n_liquidated,
             "configurations_tried": self.configurations_tried,
             "trials_recorded": self.trials_recorded,
+            "universe": self.universe,
             "cells": [cell.to_dict() for cell in self.cells],
+        }
+
+
+GATE_FILENAME = "gate.json"
+
+
+@dataclass(frozen=True)
+class GateRecord:
+    """The Replication Gate, run once: two Grids, two verdicts, and the gap.
+
+    The verdicts and the gap arrive already serialised, from `gate.py`. That
+    module decides what a verdict *is* and this one decides where it lands on
+    disk; typing the record against `GateVerdict` would put an import cycle
+    between them for no gain, since nothing here reads inside them.
+
+    `passes` is a conjunction of the two runs. ADR-0003 makes the Faithful Run
+    the gate proper — if it fails, nothing downstream means anything — but the
+    Venue Run has its own three binding criteria and a gate that reported "pass"
+    while one of them failed would be reporting the half it liked.
+    """
+
+    commit: str
+    working_tree_dirty: bool
+    run_at_utc: str
+    leg: str
+    faithful: dict[str, Any]
+    venue: dict[str, Any]
+    gap: dict[str, Any]
+    faithful_config_name: str
+    venue_config_name: str
+    universe_bracket: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def passes(self) -> bool:
+        return bool(self.faithful.get("passes")) and bool(self.venue.get("passes"))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "commit": self.commit,
+            "working_tree_dirty": self.working_tree_dirty,
+            "run_at_utc": self.run_at_utc,
+            "leg": self.leg,
+            "passes": self.passes,
+            "faithful_config_name": self.faithful_config_name,
+            "venue_config_name": self.venue_config_name,
+            "universe_bracket": self.universe_bracket,
+            "faithful": self.faithful,
+            "venue": self.venue,
+            "gap": self.gap,
         }
 
 
@@ -430,6 +486,21 @@ class ResultStore:
                 grid=record.config.name,
             )
             / GRID_FILENAME
+        )
+        return _written(path, record.to_dict())
+
+    def write_gate(self, record: GateRecord) -> Path:
+        """The gate's verdict, at the commit's own root.
+
+        Beside the two grid directories it was read from rather than inside
+        either of them: it is a statement about the pair, and filing it under one
+        run would make it look like a property of that run.
+        """
+        path = (
+            self.directory_for(
+                record.commit, working_tree_dirty=record.working_tree_dirty
+            )
+            / GATE_FILENAME
         )
         return _written(path, record.to_dict())
 

@@ -1,0 +1,69 @@
+# The Replication Gate, Venue Run — ADR-0003's amendment.
+#
+# The same configuration as `configs/gate-faithful.toml` in everything but its
+# prices and the window those prices reach: `data.binance.vision`, the archive of
+# the venue we would actually trade, from its 2017-08-17 floor.
+#
+# It tests whether the published effect survives contact with executable prices.
+# ADR-0003 does **not** hold it to the level — different prices and a truncated
+# window make a level match meaningless, and demanding one would just invite
+# fitting — so `momentum gate` measures its best net Sharpe and reports it
+# without binding it.
+#
+# **The 2017-08-17 floor is stated, not footnoted.** This run starts seven and a
+# half months after Han, Kang and Ryu's sample does, and 2017 is the most
+# volatile stretch in it. The Faithful Run exists because that difference cannot
+# be argued away, and the gap between the two runs is the measurement of it.
+#
+# The gap is itself a result. It says how much of the published effect is an
+# artefact of cross-exchange aggregate pricing versus what could have been traded
+# on one venue. Our survey found nobody reporting that number.
+
+name = "gate-venue"
+
+[data]
+venue = "binance-spot"
+# The archive, checksummed file by file, and enumerated from bucket listings
+# rather than from `exchangeInfo` — which is not survivorship-free (ADR-0008).
+price_source = "binance-archive"
+interval = "1d"
+# The archive's floor month. Any earlier start would be months of dates the
+# panel marks untradeable, which is a longer window and not a longer sample.
+start_month = "2017-08"
+end_month = "2023-08"
+
+# The same list as the Faithful Run, symbol for symbol. If the two lists ever
+# diverge the gap between the runs stops being a fact about prices, so
+# `runner._assert_gate_pair` checks everything else the two configs share and
+# this list is the part a reader has to keep in step by hand.
+symbols = [
+  "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
+  "DOGEUSDT", "SOLUSDT", "DOTUSDT", "MATICUSDT", "LTCUSDT",
+  "TRXUSDT", "AVAXUSDT", "LINKUSDT", "ATOMUSDT", "XLMUSDT",
+  "BCHUSDT", "ETCUSDT", "XMRUSDT", "ALGOUSDT", "VETUSDT",
+  "FILUSDT", "ICPUSDT", "EOSUSDT", "AAVEUSDT", "NEOUSDT",
+  "THETAUSDT", "XTZUSDT", "IOTAUSDT", "DASHUSDT", "ZECUSDT",
+  "MKRUSDT", "COMPUSDT", "SNXUSDT", "SUSHIUSDT", "YFIUSDT",
+  "UNIUSDT", "CRVUSDT", "1INCHUSDT", "ZRXUSDT", "BATUSDT",
+  "ENJUSDT", "MANAUSDT", "SANDUSDT", "AXSUSDT", "CHZUSDT",
+  "GRTUSDT", "RUNEUSDT", "KAVAUSDT", "ZILUSDT", "ONTUSDT",
+  "QTUMUSDT", "OMGUSDT", "KSMUSDT", "EGLDUSDT", "NEARUSDT",
+  "FTMUSDT", "HBARUSDT", "ONEUSDT", "CELRUSDT", "ANKRUSDT",
+  "LUNAUSDT", "FTTUSDT", "SRMUSDT", "WAVESUSDT", "RAYUSDT",
+]
+
+[strategy]
+kind = "cross_sectional"
+grid = "han-kang-ryu-21"
+quantile = 0.2
+
+[universe]
+bracket = "binance-full"
+
+[costs]
+# The paper's, matching the Faithful Run. The gap between the two runs has to be
+# a difference of prices; pricing this one in ADR-0007's Tokocrypto model would
+# fold the cost difference into it and make the number unreadable.
+model = "paper"
+slippage_bps_per_side = 0.0
+turnover_budget_weekly = 0.25

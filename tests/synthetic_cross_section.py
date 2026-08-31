@@ -98,13 +98,23 @@ def listing_page(keys: list[str]) -> bytes:
     ).encode()
 
 
-def panel_csv() -> bytes:
-    """A weekly vendor panel covering the window, plus what the store demands of it.
+def panel_csv(*, interval: str = "7D", priced: bool = False) -> bytes:
+    """A vendor panel covering the window, plus what the store demands of it.
 
     The first row reaches back to CoinMarketCap's own first snapshot so the
     stored manifest is not stamped with a window the payload does not cover, and
     the two known dead assets are present so the panel is not refused as
     survivorship-biased.
+
+    `interval` is the snapshot spacing. `7D` is what ADR-0008's one-time pull
+    actually produces and is the default, so most of the suite runs against the
+    real thing; `D` is what a Faithful Run needs, because `cmc_prices` refuses to
+    resample a weekly panel into daily marks.
+
+    `priced` puts the archive's own closes in the `price_usd` column instead of a
+    flat 1.0. That is what makes a Faithful Run and a Venue Run comparable at
+    all: two runs on the same prices should reach the same cells, so any gap
+    between them in a test is a wiring fault rather than a difference of data.
     """
     header = (
         "ts_utc,cmc_id,symbol,name,cmc_rank,price_usd,market_cap_usd,"
@@ -115,10 +125,14 @@ def panel_csv() -> bytes:
     # shape a survivorship-free panel has.
     rows.append("2018-01-07,827,BCC,BitConnect,207,29.10,268000000.0,3100000.0,9200000.0")
     rows.append("2020-08-16,6187,SRM,Serum,144,1.42,68000000.0,41000000.0,47900000.0")
-    for snapshot in pd.date_range("2020-12-06", "2021-04-04", freq="7D"):
+    # The panel's snapshots are stamped UTC, like every timestamp that crosses a
+    # boundary in this repo, so the comparison against WINDOW is like for like.
+    for snapshot in pd.date_range("2020-12-06", "2021-04-04", freq=interval, tz="UTC"):
+        in_window = WINDOW[0] <= snapshot <= WINDOW[-1]
         for rank, (symbol, (cmc_id, ticker, name)) in enumerate(CMC_ID.items(), start=1):
+            price = close_of(symbol, snapshot) if priced and in_window else 1.0
             rows.append(
-                f"{snapshot.date()},{cmc_id},{ticker},{name},{rank},1.0,"
+                f"{snapshot.date()},{cmc_id},{ticker},{name},{rank},{price:.8f},"
                 f"{MARKET_CAP[symbol]},1000000.0,1000000.0"
             )
     return ("\n".join([header, *rows]) + "\n").encode()
@@ -162,6 +176,21 @@ def archive():
 
 @pytest.fixture
 def workspace(tmp_path):
+    return _workspace_with(tmp_path, panel_csv())
+
+
+@pytest.fixture
+def daily_panel_workspace(tmp_path):
+    """A workspace whose stored panel is daily and carries the archive's prices.
+
+    What a Faithful Run needs. `cmc_prices` refuses a weekly panel rather than
+    resampling one, so the default workspace cannot run one at all — which is
+    itself asserted, in `test_gate_end_to_end.py`.
+    """
+    return _workspace_with(tmp_path, panel_csv(interval="D", priced=True))
+
+
+def _workspace_with(tmp_path, panel: bytes):
     root = tmp_path / "repo"
     root.mkdir()
     run = lambda *args: subprocess.run(args, cwd=root, check=True, capture_output=True)
@@ -186,6 +215,6 @@ def workspace(tmp_path):
         destination.write_bytes((source / relative).read_bytes())
 
     CmcPanelStore(workspace.raw_root).write(
-        panel_csv(), pulled_at_utc=RUN_AT, window_start=date(2013, 4, 28)
+        panel, pulled_at_utc=RUN_AT, window_start=date(2013, 4, 28)
     )
     return workspace

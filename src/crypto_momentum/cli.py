@@ -21,7 +21,9 @@ from crypto_momentum.data.cmc_panel import (
     SurvivorshipBiasedPanel,
     pull_panel,
 )
+from crypto_momentum.data.cmc_prices import NoPanelPrices, PanelGrainTooCoarse
 from crypto_momentum.data.fetch import ArchiveUnavailable
+from crypto_momentum.gate import Criterion, GateError, RunGap
 from crypto_momentum.data.raw_store import RawWindowAlreadyStored, RawWindowMissing
 from crypto_momentum.derive import GapInWindow
 from crypto_momentum.provenance import NotAGitRepository
@@ -35,6 +37,7 @@ from crypto_momentum.runner import (
     Workspace,
     rebuild_all_derived,
     run_config,
+    run_gate,
     run_grid,
 )
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars
@@ -44,11 +47,21 @@ from crypto_momentum.sim.cross_sectional import (
     TurnoverBudgetBreached,
 )
 from crypto_momentum.sim.grid import GridError
+from crypto_momentum.sim.published import (
+    CITATION,
+    LEGS,
+    LONG_ONLY,
+    LONG_SHORT,
+    PublishedTableError,
+)
 from crypto_momentum.sim.report import PROFITABILITY_T_BAR
 from crypto_momentum.sim.universe_policy import PolicyError
 from crypto_momentum.trials import read_trials
 
 EXIT_REFUSED = 2
+# A gate that fails is a finding, not a fault, so it gets its own code rather
+# than sharing the one a bad config gets. ADR-0003 expects it to be hard to pass.
+EXIT_GATE_FAILED = 3
 
 # Anything a researcher can cause with a bad config or a bad download. These are
 # reported as a one-line refusal rather than a traceback.
@@ -58,19 +71,23 @@ REFUSALS = (
     ChecksumMismatch,
     ConfigError,
     GapInWindow,
+    GateError,
     GridError,
     MalformedArchiveFile,
     MalformedListing,
     MalformedOverrideTable,
     MalformedPanel,
     NotAGitRepository,
+    NoPanelPrices,
     NotEnoughBars,
     NotEnoughHistory,
     PanelAlreadyStored,
+    PanelGrainTooCoarse,
     PanelMissing,
     PanelPullFailed,
     PanelWindowNotCovered,
     PolicyError,
+    PublishedTableError,
     RawWindowAlreadyStored,
     RawWindowMissing,
     SelectionError,
@@ -102,6 +119,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     grid.add_argument("config", type=Path)
 
+    gate = subcommands.add_parser(
+        "gate",
+        help=(
+            "run both halves of the Replication Gate and state an explicit pass "
+            "or fail against ADR-0003's fixed tolerances"
+        ),
+    )
+    gate.add_argument("faithful", type=Path, help="the CoinMarketCap-priced grid config")
+    gate.add_argument("venue", type=Path, help="the Binance-archive-priced grid config")
+    gate.add_argument(
+        "--reference-leg",
+        choices=LEGS,
+        default=LONG_SHORT,
+        help=(
+            "which leg of Han, Kang and Ryu's Table 14 the verdict is read "
+            f"against (default {LONG_SHORT}, the leg ADR-0003 fixes its "
+            "tolerances on). ADR-0004 makes this repo long-only, and a long-only "
+            f"run cannot produce that leg's liquidations — see {LONG_ONLY}"
+        ),
+    )
+
     build = subcommands.add_parser(
         "build-derived", help="rebuild derived bars from data/raw/ without fetching"
     )
@@ -122,6 +160,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run(args.config, workspace)
         if args.command == "grid":
             return _grid(args.config, workspace)
+        if args.command == "gate":
+            return _gate(args.faithful, args.venue, workspace, leg=args.reference_leg)
         if args.command == "build-derived":
             return _build_derived(args.config, workspace)
         if args.command == "pull-cmc-panel":
@@ -190,6 +230,105 @@ def _grid(config_path: Path, workspace: Workspace) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def _gate(
+    faithful_path: Path, venue_path: Path, workspace: Workspace, *, leg: str
+) -> int:
+    """Run the Replication Gate and print the verdict, criterion by criterion.
+
+    Exits `EXIT_GATE_FAILED` on a failure so a script can branch on it. That is
+    not an error: ADR-0003 expects the gate to be hard to pass — under both of
+    Han et al.'s corrections none of their cross-sectional portfolios clears
+    t > 3.0 — and a failure means the pipeline measured something and it did not
+    match, which is the finding the gate exists to produce.
+    """
+    run_at_utc = datetime.now(UTC).strftime(ISO_SECONDS)
+    outcome = run_gate(
+        faithful_path, venue_path, workspace, run_at_utc=run_at_utc, leg=leg
+    )
+    print(json.dumps(outcome.record.to_dict(), indent=2, sort_keys=True))
+
+    verdict = "PASS" if outcome.passes else "FAIL"
+    print(
+        f"\nReplication Gate: {verdict} — read against Han, Kang and Ryu's "
+        f"{leg} leg\n{CITATION}",
+        file=sys.stderr,
+    )
+    for run_verdict in (outcome.faithful, outcome.venue):
+        print(
+            f"\n{run_verdict.run} run ({'passes' if run_verdict.passes else 'fails'}), "
+            f"{run_verdict.n_cells_compared} of 21 cells comparable",
+            file=sys.stderr,
+        )
+        for criterion in run_verdict.criteria:
+            print(f"  {_describe_criterion(criterion)}", file=sys.stderr)
+        for warning in run_verdict.warnings:
+            print(f"  warning: {warning}", file=sys.stderr)
+
+    print(f"\n{_describe_gap(outcome.gap)}", file=sys.stderr)
+    print(_describe_bracket(outcome.record.universe_bracket), file=sys.stderr)
+    print(f"\nrecorded at {outcome.path}", file=sys.stderr)
+    if outcome.record.working_tree_dirty:
+        print(
+            "warning: the working tree was dirty, so this verdict is not "
+            f"reproducible from commit {outcome.record.commit[:12]} alone",
+            file=sys.stderr,
+        )
+    return 0 if outcome.passes else EXIT_GATE_FAILED
+
+
+def _describe_criterion(criterion: Criterion) -> str:
+    """One criterion as a line: what was measured, what it needed, and the mark.
+
+    A criterion that does not apply prints "not required" where its bar would go
+    rather than a tick, because a bar nobody was held to is not a bar cleared.
+    """
+    mark = "pass" if criterion.passed else "FAIL"
+    observed = "—" if criterion.observed is None else f"{criterion.observed:.4g}"
+    bar = (
+        "measured, not required"
+        if criterion.required is None
+        else f"needs {criterion.required}"
+    )
+    return f"[{mark:>4}] {criterion.name:<28} {observed:>8}  {bar}"
+
+
+def _describe_gap(gap: RunGap) -> str:
+    """The distance between the two runs — ADR-0003 calls this a result itself.
+
+    It measures how much of the published effect is an artefact of cross-exchange
+    aggregate pricing rather than something that could have been traded on one
+    venue. Nobody in the surveyed literature reports it.
+    """
+    correlation = (
+        "—" if gap.spearman_between_runs is None else f"{gap.spearman_between_runs:.3f}"
+    )
+    best = "—" if gap.best_net_sharpe_gap is None else f"{gap.best_net_sharpe_gap:+.3f}"
+    return (
+        "gap (venue minus faithful), a result in its own right:\n"
+        f"  best net Sharpe            {best}\n"
+        f"  mean |Sharpe| gap          {gap.mean_absolute_sharpe_gap:.3f} "
+        f"across {gap.n_cells_compared} cells\n"
+        f"  rank correlation of runs   {correlation}\n"
+        f"  liquidation count          {gap.liquidation_count_gap:+d}"
+    )
+
+
+def _describe_bracket(bracket: dict) -> str:
+    """The Universe as both bounds, never as one chosen number.
+
+    A count quoted on one bound alone has chosen which listing risk to show, and
+    the choice is invisible in the number.
+    """
+    lines = ["universe bracket, both bounds (symbols tradeable at some point):"]
+    for run, bounds in bracket.items():
+        if not bounds:
+            lines.append(f"  {run:<9} not recorded")
+            continue
+        stated = ", ".join(f"{name} {count}" for name, count in sorted(bounds.items()))
+        lines.append(f"  {run:<9} {stated}")
+    return "\n".join(lines)
 
 
 def _describe_cell(cell: GridCellRecord) -> str:
