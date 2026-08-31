@@ -259,6 +259,10 @@ def newey_west_t_statistic(
     The Newey-West long-run variance widens the error by the autocovariances out
     to `lags`, Bartlett-weighted so the estimate stays non-negative.
 
+    `lags` exists so a test can pin the estimator at a bandwidth whose answer
+    was worked out by hand. No run passes it: a bandwidth chosen per run is a
+    knob to mine, and the automatic rule above is what every result uses.
+
     The autocovariances and the variance of the mean both divide by T, the
     textbook estimator, with no small-sample correction. On a window of a few
     dozen marks that biases the standard error down and so the t-statistic up —

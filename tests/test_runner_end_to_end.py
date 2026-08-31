@@ -11,7 +11,7 @@ from crypto_momentum.data.binance_archive import ChecksumMismatch
 from crypto_momentum.runner import Workspace, _btc_over_the_same_window, run_config
 from crypto_momentum.sim.marking import mark_daily
 from crypto_momentum.sim.report import summarise
-from crypto_momentum.trials import read_trials
+from crypto_momentum.trials import append_trial, read_trials
 
 RUN_AT = "2026-08-31T09:00:00Z"
 
@@ -279,6 +279,46 @@ def test_the_result_counts_the_configurations_tried_to_reach_it(
     assert second.configurations_tried == 1
     assert second.trials_recorded == 2
     assert read_trials(workspace.trials_path)[-1]["configurations_tried"] == 1
+
+
+def test_another_strategy_s_trials_do_not_count_towards_this_one(
+    workspace, config_path, archive
+):
+    """The protocol asks how many configurations were tried to reach *this*
+    number. A cross-sectional search does not make a hold more mined."""
+    append_trial(
+        workspace.trials_path,
+        {"config_sha256": "0" * 64, "strategy_kind": "cross_sectional"},
+    )
+
+    record = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    assert record.configurations_tried == 1
+    # It is still a run, and the run count says so.
+    assert record.trials_recorded == 2
+
+
+def test_a_hold_reports_its_exposure_without_inventing_a_turnover(
+    workspace, config_path, archive
+):
+    """A hold is fully invested in one name, and rebalances never — so it has no
+    Rebalance Turnover to put under ADR-0007's weekly ceiling."""
+    record = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    assert record.portfolio["mean_gross_exposure"] == pytest.approx(1.0)
+    assert record.portfolio["mean_net_exposure"] == pytest.approx(1.0)
+    assert record.portfolio["mean_n_positions"] == pytest.approx(1.0)
+    assert record.portfolio["n_rebalances"] == 0
+    assert "mean_rebalance_turnover" not in record.portfolio
+    assert "mean_rebalance_turnover" not in read_trials(workspace.trials_path)[0]
+
+
+def test_the_hurdle_records_whether_it_covered_the_run_s_own_days(
+    workspace, config_path, archive
+):
+    record = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    assert record.benchmarks["btc_buy_and_hold"]["spans_the_run_window"] is True
 
 
 def test_an_edited_config_is_another_configuration_tried(

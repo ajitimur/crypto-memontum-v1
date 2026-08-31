@@ -224,9 +224,13 @@ def _describe_profitability(reported: dict) -> str:
     # The verdict is read off the result rather than re-derived here, so the bar
     # is applied in exactly one place and moving it moves both.
     verdict = "clears" if reported.get("clears_profitability_bar") else "below"
+    # The number of marks is quoted because the estimator carries no small-sample
+    # correction: on a short window the standard error is biased down and the
+    # t-statistic up, towards clearing. A reader cannot weigh that without T.
     return (
         f"mean log return {mean_log:.6f}/day, t = {t_statistic:.2f} "
-        f"(Newey-West, {reported.get('newey_west_lags')} lags) — "
+        f"(Newey-West, {reported.get('newey_west_lags')} lags, "
+        f"{reported.get('n_marks')} marks) — "
         f"{verdict} the t > {PROFITABILITY_T_BAR} bar"
     )
 
@@ -264,7 +268,10 @@ def _describe_hurdle(benchmarks: dict) -> str:
         return "not recorded"
     conditions = ("sharpe_above_btc", "drawdown_no_worse_than_btc", "clears_profitability_bar")
     if hurdle.get("clears"):
-        return "cleared — better Sharpe than BTC, no worse drawdown, and t > 3.0"
+        return (
+            "cleared — better Sharpe than BTC, no worse drawdown, and "
+            f"t > {PROFITABILITY_T_BAR}"
+        )
     failed = [name for name in conditions if hurdle.get(name) is not True]
     return f"not cleared — {', '.join(failed)}"
 

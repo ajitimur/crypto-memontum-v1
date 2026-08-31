@@ -43,7 +43,11 @@ from crypto_momentum.sim.benchmarks import (
     cap_weighted_market,
     deployment_hurdle,
 )
-from crypto_momentum.sim.buy_and_hold import NotEnoughBars, simulate_buy_and_hold
+from crypto_momentum.sim.buy_and_hold import (
+    NotEnoughBars,
+    hold_metadata,
+    simulate_buy_and_hold,
+)
 from crypto_momentum.sim.cross_sectional import CrossSectionalRun, simulate_cross_sectional
 from crypto_momentum.sim.report import RunResult
 from crypto_momentum.sim.universe_policy import (
@@ -121,6 +125,11 @@ def run_config(
             config, workspace, run_at_utc=run_at_utc, open_url=open_url
         )
 
+    counts = _counts_tried(
+        workspace.trials_path,
+        config_sha256=config_sha256,
+        strategy_kind=config.strategy_kind,
+    )
     record = RunRecord(
         commit=provenance.commit,
         working_tree_dirty=provenance.working_tree_dirty,
@@ -132,14 +141,10 @@ def run_config(
         window=output.window,
         portfolio=output.portfolio,
         benchmarks=output.benchmarks,
-        # Two different counts, because they answer two different questions. The
-        # protocol asks how many *configurations* were tried to reach a quoted
-        # number, so that is distinct config fingerprints and a config re-run
-        # unchanged does not inflate it — a 21-cell Grid run twice is 21 tried,
-        # not 42. How many runs were recorded is kept beside it. This run counts
-        # in both: it is one of the configurations the number came from. The log
-        # is appended below, so both are taken before it.
-        **_counts_tried(workspace.trials_path, config_sha256=config_sha256),
+        # This run counts in both: it is one of the configurations the number
+        # came from. The log is appended below, so both are taken before it.
+        configurations_tried=counts.configurations_tried,
+        trials_recorded=counts.trials_recorded,
     )
     ResultStore(workspace.results_root).write(record)
     append_trial(workspace.trials_path, record.trial_line())
@@ -164,21 +169,7 @@ def _run_single_asset(
             "last_bar_ts_utc": _iso(bars.index[-1]),
             "n_bars": len(bars),
         },
-        # A hold has no selection to describe, but the reporting block still
-        # asks how much was invested and in how many names, and the answer for
-        # a long-only unlevered single hold is: all of it, in one, every mark.
-        portfolio={
-            "strategy": config.strategy_kind,
-            "long_only": True,
-            "levered": False,
-            "trend_gate": False,
-            "n_rebalances": 1,
-            "mean_n_positions": 1.0,
-            "mean_gross_exposure": 1.0,
-            "mean_net_exposure": 1.0,
-            "max_gross_exposure": 1.0,
-            "mean_rebalance_turnover": 1.0,
-        },
+        portfolio=hold_metadata(),
         benchmarks=_benchmarks(
             result,
             config=config,
@@ -303,23 +294,52 @@ def _run_cross_sectional(
     )
 
 
-def _counts_tried(trials_path: Path, *, config_sha256: str) -> dict[str, int]:
-    """How many configurations have been tried, and how many runs recorded.
+@dataclass(frozen=True)
+class Counts:
+    """How much searching stands behind a quoted number.
+
+    `configurations_tried` is what the protocol asks for beside a result: the
+    configurations tried *to reach this one*, counted by fingerprint over the
+    same strategy. `trials_recorded` is every run in the log, whatever strategy
+    it ran, so the narrower count can never be mistaken for the whole history.
+
+    Both are read from the trials log, so neither is reproducible from a commit
+    and a config alone — and that is correct. How many things were tried before
+    this number is a fact about the search, not about the path; a fresh
+    workspace has not done the searching and must not inherit the claim that it
+    did.
+    """
+
+    configurations_tried: int
+    trials_recorded: int
+
+
+def _counts_tried(
+    trials_path: Path, *, config_sha256: str, strategy_kind: str
+) -> Counts:
+    """Count the search behind this run, from the trials log.
 
     A configuration is its fingerprint, not its name: editing a config and
     running it again is a second configuration tried, and running the same bytes
-    twice is not. A trial logged before fingerprints were recorded has no
-    fingerprint to count and is left out of the configuration count rather than
-    collapsed into one — it is still counted as a run.
+    twice is not. The count is confined to trials of the same strategy, because
+    the protocol asks how many configurations were tried to reach *this* number
+    — a cross-sectional result did not become more mined because a buy-and-hold
+    skeleton was run first.
+
+    A trial logged before fingerprints were recorded has no fingerprint to count
+    and is left out of the configuration count rather than collapsed into one.
+    It is still counted as a run.
     """
     trials = read_trials(trials_path)
     fingerprints = {
-        trial["config_sha256"] for trial in trials if trial.get("config_sha256")
+        trial["config_sha256"]
+        for trial in trials
+        if trial.get("config_sha256") and trial.get("strategy_kind") == strategy_kind
     }
-    return {
-        "configurations_tried": len(fingerprints | {config_sha256}),
-        "trials_recorded": len(trials) + 1,
-    }
+    return Counts(
+        configurations_tried=len(fingerprints | {config_sha256}),
+        trials_recorded=len(trials) + 1,
+    )
 
 
 def _benchmarks(
@@ -352,23 +372,30 @@ def _benchmarks(
         "btc_buy_and_hold": {
             "symbol": BENCHMARK_SYMBOL,
             "computed": btc is not None,
-            **({"reason": btc_unavailable} if btc is None else metrics_of(btc)),
+            **(
+                {"reason": btc_unavailable}
+                if btc is None
+                else {
+                    **metrics_of(btc),
+                    # Whether the hurdle really did cover the run's own days. It
+                    # is clipped to them, but a gap in Bitcoin's own bars at the
+                    # run's fill date moves the hold's entry, and a hurdle over
+                    # a different window is a comparison worth knowing about.
+                    "spans_the_run_window": (
+                        btc.entry_ts_utc == result.entry_ts_utc
+                        and btc.exit_ts_utc == result.exit_ts_utc
+                    ),
+                }
+            ),
         },
         "cap_weighted_market": {
             "computed": market is not None,
             **(
                 {"reason": market_unavailable}
                 if market is None
-                else {
-                    **metrics_of(market.result),
-                    # The same shape the strategy's own block reports, so the
-                    # reference is read on the criteria the run is read on.
-                    "n_rebalances": market.n_rebalances,
-                    "mean_n_positions": market.mean_n_positions,
-                    "mean_rebalance_turnover": market.mean_rebalance_turnover,
-                    "mean_gross_exposure": market.mean_gross_exposure,
-                    "mean_net_exposure": market.mean_gross_exposure,
-                }
+                # The reference describes itself the same way the strategy does,
+                # off the same method, so the two are read on the same criteria.
+                else {**metrics_of(market.result), **market.to_metadata()}
             ),
         },
         "deployment_hurdle": deployment_hurdle(result, btc=btc).to_metadata(),

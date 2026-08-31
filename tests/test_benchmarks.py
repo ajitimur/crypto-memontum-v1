@@ -100,7 +100,7 @@ def market_inputs():
     }
 
 
-def market_run(market_inputs, **overrides):
+def market_run(market_inputs, *, bars_by_symbol_override=None, **overrides):
     arguments = {
         "tradeable": market_inputs["tradeable"],
         "market_caps": market_inputs["market_caps"],
@@ -109,7 +109,8 @@ def market_run(market_inputs, **overrides):
         "cost_bps_per_side": 0.0,
         **overrides,
     }
-    return cap_weighted_market(market_inputs["bars_by_symbol"], **arguments)
+    bars = bars_by_symbol_override or market_inputs["bars_by_symbol"]
+    return cap_weighted_market(bars, **arguments)
 
 
 def strategy_run(market_inputs):
@@ -155,6 +156,27 @@ def test_an_asset_the_universe_did_not_offer_that_date_is_not_in_the_market(
     assert "DOGEUSDT" not in market.selections[0].symbols
     # The remaining caps sum to 15 billion, so BTC's share rises to 1/15.
     assert weights["BTCUSDT"] == pytest.approx(1.0 / 15.0)
+
+
+def test_an_asset_too_new_to_rank_is_not_in_the_market_portfolio_either(
+    market_inputs,
+):
+    """A name the strategy could not have selected is not one it failed to hold.
+    Eligibility runs through the same ranking, so an asset without a full
+    lookback of history is out of both books on that date."""
+    closes = closes_frame(dates("2021-01-01", 60))
+    late = closes["DOGEUSDT"].copy()
+    # Listed four days before the first Decision Bar, so a 14-day lookback
+    # cannot be formed for it there.
+    late.iloc[:10] = float("nan")
+    bars = bars_from_closes(closes)
+    bars["DOGEUSDT"] = bars["DOGEUSDT"].assign(close=late, open=late, high=late, low=late)
+
+    market = market_run(market_inputs, bars_by_symbol_override=bars)
+
+    assert "DOGEUSDT" not in market.selections[0].symbols
+    # And once it has the history, it is in.
+    assert "DOGEUSDT" in market.selections[-1].symbols
 
 
 def test_the_market_portfolio_shares_the_strategy_s_rebalance_cadence(market_inputs):

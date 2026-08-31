@@ -71,9 +71,19 @@ def cap_weighted_market(
     rebalance cadence, same daily mark, same costs — the one difference is that
     nothing is selected on the signal.
 
-    `lookback_days` does not form a position here, but it does set where the
-    first Decision Bar falls, so it is taken from the strategy and the two paths
-    cover the same dates.
+    `lookback_days` does not form a position here, but it does two things, and
+    the second is a deliberate choice rather than a side effect. It sets where
+    the first Decision Bar falls, so the two paths cover the same dates. And
+    because eligibility runs through the same ranking the strategy uses, an
+    asset without `lookback_days` of price history is out of the market
+    portfolio on that date, exactly as it is out of the strategy's cross-section.
+
+    That is narrower than "everything the Universe listed", and it is the right
+    reference anyway: a newly listed asset the strategy could not have ranked is
+    not something the strategy failed to hold. The alternative — a market
+    portfolio holding names the strategy was structurally unable to select —
+    would attribute the gap between them to the signal, which is the one thing
+    the comparison is supposed to isolate.
     """
     return simulate_cross_sectional(
         bars_by_symbol,
