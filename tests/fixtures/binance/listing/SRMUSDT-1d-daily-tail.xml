@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>data.binance.vision</Name><Prefix>data/spot/daily/klines/SRMUSDT/1d/</Prefix><Marker>data/spot/daily/klines/SRMUSDT/1d/SRMUSDT-1d-2022-11-99</Marker><MaxKeys>1000</MaxKeys><Delimiter>/</Delimiter><IsTruncated>false</IsTruncated></ListBucketResult>
