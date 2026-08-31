@@ -32,6 +32,10 @@ _Avoid_: parameter sweep, sensitivity analysis
 A cumulative portfolio loss breaching 100%. Terminal: positions close, the return series ends there, and the run reports as liquidated with its date rather than continuing.
 _Avoid_: blowup, margin call, wipeout
 
+**Halt**:
+A bar at which an asset could not have been traded — no volume, or no price at all. A position held through one exits at the last tradeable price before it, and a print that appears after it is not an exit we could have chosen. A price of zero on real volume is not a halt but a trade at nothing, and is marked as the loss it is.
+_Avoid_: delisting, suspension, stale bar
+
 **Churn**:
 An asset's traded volume relative to its market capitalisation. High churn marks speculative activity, where price continuation tends to be short-lived.
 _Avoid_: turnover, volume ratio, activity

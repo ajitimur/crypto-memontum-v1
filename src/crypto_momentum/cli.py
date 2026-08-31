@@ -78,7 +78,7 @@ def _run(config_path: Path, workspace: Workspace) -> int:
     print(json.dumps(record.to_dict(), indent=2, sort_keys=True))
     # The result JSON is the machine's copy and stays alone on stdout; the
     # reporting block's liquidation line is for the researcher reading along.
-    print(f"liquidation: {describe_liquidation(record.metrics)}", file=sys.stderr)
+    print(f"liquidation: {_describe_liquidation(record.metrics)}", file=sys.stderr)
     if record.working_tree_dirty:
         print(
             "warning: the working tree was dirty, so this result is not "
@@ -103,21 +103,21 @@ def _trials(workspace: Workspace) -> int:
         print(
             f"  {trial.get('run_at_utc')}  {trial.get('config_name')}  "
             f"net_return={trial.get('net_return')}  "
-            f"liquidation={describe_liquidation(trial)}"
+            f"liquidation={_describe_liquidation(trial)}"
         )
     return 0
 
 
-def describe_liquidation(metrics: dict) -> str:
+def _describe_liquidation(reported: dict) -> str:
     """The reporting block's liquidation line: a count with dates, or "none".
 
     ADR-0001 asks for an explicit "none" rather than a silent absence. A trial
     logged before the run was marked daily has no answer to give and says so,
     rather than reading like a run that was checked and survived.
     """
-    if "liquidation_dates" not in metrics:
+    if "liquidation_dates" not in reported:
         return "not recorded"
-    dates = metrics["liquidation_dates"]
+    dates = reported["liquidation_dates"]
     if not dates:
         return "none"
     plural = "" if len(dates) == 1 else "s"

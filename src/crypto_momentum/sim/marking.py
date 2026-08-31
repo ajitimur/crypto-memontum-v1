@@ -35,14 +35,18 @@ class MarkedPath:
     """A daily-marked net equity curve and how it ended.
 
     `equity_net` starts at the first mark and is already net of the entry cost;
-    equity is 1.0 at the Decision Bar by construction. When `liquidated`, the
+    equity is 1.0 at the Decision Bar by construction. When it was liquidated the
     curve ends at `liquidation_ts_utc` with a final value of exactly 0.0 and no
     exit cost, because a wiped-out position is not sold — it is gone.
     """
 
     equity_net: pd.Series
-    liquidated: bool
     liquidation_ts_utc: pd.Timestamp | None
+
+    @property
+    def liquidated(self) -> bool:
+        """Whether the path ended in a Liquidation. One fact, one place it lives."""
+        return self.liquidation_ts_utc is not None
 
 
 def mark_daily(
@@ -69,24 +73,28 @@ def mark_daily(
         breach_ts = breached.idxmax()
         equity = equity.loc[:breach_ts].copy()
         equity.iloc[-1] = 0.0
-        return MarkedPath(equity_net=equity, liquidated=True, liquidation_ts_utc=breach_ts)
+        return MarkedPath(equity_net=equity, liquidation_ts_utc=breach_ts)
 
     equity = equity.copy()
     equity.iloc[-1] = equity.iloc[-1] * (1.0 - exit_cost)
-    return MarkedPath(equity_net=equity, liquidated=False, liquidation_ts_utc=None)
+    return MarkedPath(equity_net=equity, liquidation_ts_utc=None)
 
 
 def stops_trading_at(bars: pd.DataFrame) -> pd.Timestamp | None:
     """The first bar `bars`' asset could not have been traded on, or `None`.
 
-    A bar with no volume, no price, or a zero price is a bar no order could have
-    filled at — a delisting, a depeg unwind, or a venue pulling the pair. The
-    position exits at the last tradeable price before it, so a resumption
-    afterwards is deliberately ignored: waiting for one means knowing in advance
-    that it comes.
+    A bar with no volume or no price is a bar no order could have filled at — a
+    delisting, a depeg unwind, or a venue pulling the pair. The position exits at
+    the last tradeable price before it, so a resumption afterwards is deliberately
+    ignored: waiting for one means knowing in advance that it comes.
+
+    A price of zero printed on real volume is not a halt. It is the asset trading
+    at nothing, which is the one path by which v1's long-only spot holding reaches
+    a 100% loss; it is left in the series so the mark can liquidate on it rather
+    than being booked as an exit at the last price that happened to be positive.
     """
     close = bars["close"].astype(float)
-    tradeable = close.notna() & (close > 0.0)
+    tradeable = close.notna()
     if "volume" in bars.columns:
         volume = bars["volume"].astype(float)
         tradeable &= volume.notna() & (volume > 0.0)

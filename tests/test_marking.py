@@ -159,8 +159,16 @@ def test_an_asset_whose_price_goes_missing_stops_there():
     assert stops_trading_at(bars) == pd.Timestamp("2021-07-06T00:00:00Z")
 
 
-def test_a_zero_price_is_not_a_tradeable_price():
+def test_a_price_of_zero_printed_on_real_volume_is_a_trade_and_not_a_halt():
+    """The asset traded at nothing. That is a 100% loss for the mark to liquidate
+    on, not an exit at the last price that happened to be positive."""
     bars = bars_from([(100.0, 5.0), (0.0, 5.0)])
+
+    assert stops_trading_at(bars) is None
+
+
+def test_a_price_of_zero_with_nothing_trading_is_a_halt():
+    bars = bars_from([(100.0, 5.0), (0.0, 0.0)])
 
     assert stops_trading_at(bars) == pd.Timestamp("2021-07-06T00:00:00Z")
 

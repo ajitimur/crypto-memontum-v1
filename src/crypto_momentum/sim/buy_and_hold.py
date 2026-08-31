@@ -53,12 +53,21 @@ def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> Ru
     exit_reason = WINDOW_END if len(held) == len(bars) - 1 else STOPPED_TRADING
     cost = cost_bps_per_side * BPS
     entry_price = float(held["open"].iloc[0])
+    if not entry_price > 0.0:
+        raise NotEnoughBars(
+            f"the fill bar at {held.index[0].date()} has no price to buy at "
+            f"(open {entry_price})"
+        )
     closes = held["close"].astype(float)
 
     # The first mark is measured from the fill price, every later one from the
     # previous close, so the path compounds day by day rather than jumping from
     # boundary to boundary.
-    mark_returns = closes / closes.shift(1).fillna(entry_price) - 1.0
+    previous_close = closes.shift(1)
+    previous_close.iloc[0] = entry_price
+    # A close of zero is the position reaching nothing. The mark on it is -100%
+    # and the series ends there, so it is never a base to divide by.
+    mark_returns = closes / previous_close.where(previous_close > 0.0) - 1.0
     path = mark_daily(mark_returns, entry_cost=cost, exit_cost=cost)
 
     return summarise(

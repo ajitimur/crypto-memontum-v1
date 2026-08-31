@@ -8,7 +8,7 @@ import pytest
 
 import crypto_momentum.sim as sim_package
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars, simulate_buy_and_hold
-from crypto_momentum.sim.report import STOPPED_TRADING, WINDOW_END
+from crypto_momentum.sim.report import LIQUIDATED, STOPPED_TRADING, WINDOW_END
 
 
 def bars_from(rows) -> pd.DataFrame:
@@ -199,6 +199,45 @@ def test_a_price_that_prints_again_after_the_halt_cannot_be_sold_into():
 
     assert result.exit_price == pytest.approx(110.0)
     assert result.net_return == pytest.approx(0.10)
+
+
+def test_an_asset_that_trades_to_zero_liquidates_the_run_on_the_day_it_does():
+    """ADR-0004 leaves one route to a 100% loss in long-only spot: the asset itself
+    goes to nothing. This is the strategy wired end to end through that route."""
+    bars = bars_with_volume(
+        [
+            (100.0, 100.0, 7.0),  # decision bar
+            (100.0, 80.0, 7.0),
+            (80.0, 0.0, 7.0),  # traded at nothing
+            (0.0, 0.0, 7.0),
+        ]
+    )
+
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=100.0)
+
+    assert result.liquidated
+    assert result.exit_reason == LIQUIDATED
+    assert result.liquidation_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
+    assert result.exit_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
+    assert result.net_return == pytest.approx(-1.0)
+    assert result.equity_net.iloc[-1] == 0.0
+
+
+def test_a_liquidated_run_does_not_report_its_wipeout_as_cost_drag():
+    """Cost Drag is the gap between a run and the same run without costs. Once the
+    position is gone there is no such run to compare against."""
+    bars = bars_with_volume(
+        [
+            (100.0, 100.0, 7.0),  # decision bar
+            (100.0, 80.0, 7.0),
+            (80.0, 0.0, 7.0),
+        ]
+    )
+
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=100.0)
+
+    assert result.cost_drag_annualised is None
+    assert result.cost_drag_as_fraction_of_gross is None
 
 
 def test_an_asset_that_stops_trading_before_the_fill_has_nowhere_to_fill():

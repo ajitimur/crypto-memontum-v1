@@ -44,7 +44,10 @@ class RunResult:
 
     `exit_reason` says why the series ends where it does: the window ran out, the
     asset stopped trading, or the run was liquidated. On a liquidation the series
-    ends at `liquidation_ts_utc` and nothing after it exists to report.
+    ends at `liquidation_ts_utc` and nothing after it exists to report; the two
+    `gross` fields then describe the *asset's* path, not a position that survived
+    to earn it, and Cost Drag is `None` because the comparison it measures — the
+    same run without costs — is a different run once the position is wiped out.
     """
 
     decision_ts_utc: pd.Timestamp
@@ -56,7 +59,6 @@ class RunResult:
     n_marks: int
     cost_bps_per_side: float
     equity_net: pd.Series
-    liquidated: bool
     liquidation_ts_utc: pd.Timestamp | None
     gross_return: float
     net_return: float
@@ -68,8 +70,13 @@ class RunResult:
     max_drawdown: float
     max_drawdown_peak_ts_utc: pd.Timestamp | None
     max_drawdown_trough_ts_utc: pd.Timestamp | None
-    cost_drag_annualised: float
+    cost_drag_annualised: float | None
     cost_drag_as_fraction_of_gross: float | None
+
+    @property
+    def liquidated(self) -> bool:
+        """Whether the run ended in a Liquidation."""
+        return self.liquidation_ts_utc is not None
 
     @property
     def liquidation_dates(self) -> list[pd.Timestamp]:
@@ -110,20 +117,21 @@ def summarise(
     ann_return_net = _annualise(net_return, years)
     ann_return_gross = _annualise(gross_return, years)
     peak_ts, trough_ts, max_drawdown = _max_drawdown(equity_net)
-    cost_drag_annualised = ann_return_gross - ann_return_net
+    cost_drag_annualised = (
+        None if path.liquidated else ann_return_gross - ann_return_net
+    )
 
     return RunResult(
         decision_ts_utc=decision_ts_utc,
         entry_ts_utc=equity_net.index[0],
         exit_ts_utc=equity_net.index[-1],
         exit_reason=LIQUIDATED if path.liquidated else exit_reason,
+        liquidation_ts_utc=path.liquidation_ts_utc,
         entry_price=entry_price,
         exit_price=exit_price,
         n_marks=n_marks,
         cost_bps_per_side=cost_bps_per_side,
         equity_net=equity_net,
-        liquidated=path.liquidated,
-        liquidation_ts_utc=path.liquidation_ts_utc,
         gross_return=gross_return,
         net_return=net_return,
         ann_return_gross=ann_return_gross,
@@ -141,13 +149,16 @@ def summarise(
     )
 
 
-def _fraction_of_gross(cost_drag_annualised: float, ann_return_gross: float) -> float | None:
+def _fraction_of_gross(
+    cost_drag_annualised: float | None, ann_return_gross: float
+) -> float | None:
     """Cost Drag as a share of gross annualised return.
 
     `docs/agents/quant-research.md` caps this at one third. `None` when gross
-    return is not positive, because a share of a loss is not a meaningful ratio.
+    return is not positive, because a share of a loss is not a meaningful ratio,
+    and `None` when there is no Cost Drag to take a share of.
     """
-    if ann_return_gross <= 0.0:
+    if cost_drag_annualised is None or ann_return_gross <= 0.0:
         return None
     return cost_drag_annualised / ann_return_gross
 
