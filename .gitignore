@@ -220,8 +220,8 @@ __marimo__/
 # Research data and results
 #   Raw pulls and derived frames are too large for git and are rebuilt by script;
 #   keep them in object storage and track only the fetch/build config.
-data/
-results/
+/data/
+/results/
 *.parquet
 *.feather
 *.h5

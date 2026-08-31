@@ -1,0 +1,26 @@
+# The walking skeleton: one asset, one window, buy and hold.
+#
+# Not a strategy. It exists to prove the path from a config file to a recorded,
+# reproducible result, and to fix the two seams later tickets build on — the
+# archive adapter and the pure simulation core.
+#
+# The window sits inside the Development Sample (through 2023-12-31), so running
+# this does not spend any of the Holdout.
+
+name = "skeleton-btcusdt-2021q1"
+
+[data]
+venue = "binance-spot"
+symbol = "BTCUSDT"
+interval = "1d"
+start_month = "2021-01"
+end_month = "2021-03"
+
+[strategy]
+kind = "buy_and_hold"
+
+[costs]
+# ADR-0007: Tokocrypto charges 0.15% fee + 0.21% PPh + 0.0444% levy per side,
+# on buys as well as sells. Slippage is nominal on BTCUSDT at this size.
+fee_bps_per_side = 40.44
+slippage_bps_per_side = 5.0
