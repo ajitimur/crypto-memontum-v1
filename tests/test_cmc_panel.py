@@ -41,6 +41,16 @@ def store(tmp_path) -> CmcPanelStore:
     return CmcPanelStore(tmp_path / "raw")
 
 
+@pytest.fixture
+def survivors_only() -> bytes:
+    """The same panel as it would come back from the survivorship-biased endpoint."""
+    return b"\n".join(
+        line
+        for line in (FIXTURES / "cmc-panel-sample.csv").read_bytes().splitlines()
+        if b",827," not in line and b",6187," not in line
+    )
+
+
 def _runner(payload: bytes, calls: list[str]):
     """An injected stand-in for `Rscript scripts/pull_cmc_panel.R`."""
 
@@ -90,22 +100,22 @@ def test_rebuilding_does_not_re_fetch_the_panel(store, panel_csv):
 
 
 def test_writing_over_a_stored_panel_is_an_error_not_an_overwrite(store, panel_csv):
-    store.write(panel_csv, pulled_at_utc=PULLED_AT)
+    store.write(panel_csv, pulled_at_utc=PULLED_AT, window_start=FIXTURE_START)
 
     with pytest.raises(PanelAlreadyStored, match="cmc"):
-        store.write(b"replacement", pulled_at_utc=PULLED_AT)
+        store.write(b"replacement", pulled_at_utc=PULLED_AT, window_start=FIXTURE_START)
 
     assert store.read() == panel_csv
 
 
 def test_a_stored_panel_is_not_writable(store, panel_csv):
-    path = store.write(panel_csv, pulled_at_utc=PULLED_AT)
+    path = store.write(panel_csv, pulled_at_utc=PULLED_AT, window_start=FIXTURE_START)
 
     assert path.stat().st_mode & 0o222 == 0
 
 
 def test_reading_a_panel_that_was_never_pulled_says_so(store):
-    assert not store.has()
+    assert not store.has_panel()
     with pytest.raises(PanelMissing):
         store.read()
 
@@ -116,13 +126,13 @@ def test_reading_a_panel_that_was_never_pulled_says_so(store):
 def test_the_panel_is_checksummed_and_the_digest_reads_back(store, panel_csv):
     import hashlib
 
-    store.write(panel_csv, pulled_at_utc=PULLED_AT)
+    store.write(panel_csv, pulled_at_utc=PULLED_AT, window_start=FIXTURE_START)
 
     assert store.manifest()["sha256"] == hashlib.sha256(panel_csv).hexdigest()
 
 
 def test_the_manifest_records_what_the_protocol_asks_for(store, panel_csv):
-    path = store.write(panel_csv, pulled_at_utc=PULLED_AT)
+    path = store.write(panel_csv, pulled_at_utc=PULLED_AT, window_start=FIXTURE_START)
     manifest = json.loads(path.with_suffix(path.suffix + ".manifest.json").read_text())
 
     assert manifest["vendor"] == "coinmarketcap"
@@ -130,7 +140,7 @@ def test_the_manifest_records_what_the_protocol_asks_for(store, panel_csv):
     assert manifest["symbol_convention"] == "CoinMarketCap numeric id; symbol is not stable"
     assert manifest["bar_close_convention"] == "snapshot as of 00:00 UTC on ts_utc"
     assert manifest["timezone"] == "UTC"
-    assert manifest["window_start"] == PANEL_START.isoformat()
+    assert manifest["window_start"] == FIXTURE_START.isoformat()
     assert manifest["window_end"] == "2026-08-31"
     assert manifest["pulled_at_utc"] == PULLED_AT
     assert manifest["bytes"] == len(panel_csv)
@@ -140,7 +150,7 @@ def test_the_manifest_records_the_dead_coins_it_found_not_a_claim_of_freedom(
     store, panel_csv
 ):
     """`survivorship_free = true` would be an assertion about a file we did not read."""
-    store.write(panel_csv, pulled_at_utc=PULLED_AT)
+    store.write(panel_csv, pulled_at_utc=PULLED_AT, window_start=FIXTURE_START)
 
     assert store.manifest()["dead_assets_present"] == [827, 6187]
 
@@ -148,12 +158,31 @@ def test_the_manifest_records_the_dead_coins_it_found_not_a_claim_of_freedom(
 def test_the_manifest_separates_the_window_asked_for_from_what_came_back(
     store, panel_csv
 ):
-    store.write(panel_csv, pulled_at_utc=PULLED_AT)
+    """The request and the delivery are different facts and both get recorded.
+
+    Asking for 2018 onward and being handed history back to 2017 is fine — the
+    panel covers the request. What the manifest must not do is round the two
+    into one number, so a later reader can see which is which.
+    """
+    store.write(panel_csv, pulled_at_utc=PULLED_AT, window_start=date(2018, 1, 1))
     manifest = store.manifest()
 
-    assert manifest["window_start"] == PANEL_START.isoformat()
+    assert manifest["window_start"] == "2018-01-01"
     assert manifest["first_snapshot"] == "2017-01-01"
     assert manifest["last_snapshot"] == "2023-01-01"
+
+
+def test_writing_a_short_panel_under_a_long_window_is_refused(store, panel_csv):
+    """The check lives in `write`, not only in `pull_panel`.
+
+    A manifest is only worth trusting if no path can write one it has not
+    earned, so stamping the fixture's 2017 history with the real 2013 window
+    has to fail here exactly as it does through the pull.
+    """
+    with pytest.raises(PanelWindowNotCovered, match="2013-04-28"):
+        store.write(panel_csv, pulled_at_utc=PULLED_AT, window_start=PANEL_START)
+
+    assert not store.has_panel()
 
 
 def test_a_panel_that_does_not_reach_the_requested_start_is_refused(store, panel_csv):
@@ -166,21 +195,19 @@ def test_a_panel_that_does_not_reach_the_requested_start_is_refused(store, panel
     with pytest.raises(PanelWindowNotCovered, match="2013-04-28"):
         pull_panel(store, run_pull=run, pulled_at_utc=PULLED_AT)
 
-    assert not store.has()
+    assert not store.has_panel()
 
 
-def test_a_biased_panel_cannot_be_stored_even_by_writing_it_directly(store):
+def test_a_biased_panel_cannot_be_stored_even_by_writing_it_directly(
+    store, survivors_only
+):
     """The check lives in `write`, so no path can put a biased panel on disk."""
-    survivors_only = b"\n".join(
-        line
-        for line in (FIXTURES / "cmc-panel-sample.csv").read_bytes().splitlines()
-        if b",827," not in line and b",6187," not in line
-    )
-
     with pytest.raises(SurvivorshipBiasedPanel):
-        store.write(survivors_only, pulled_at_utc=PULLED_AT)
+        store.write(
+            survivors_only, pulled_at_utc=PULLED_AT, window_start=FIXTURE_START
+        )
 
-    assert not store.has()
+    assert not store.has_panel()
 
 
 # --- the panel is survivorship-free --------------------------------------
@@ -200,13 +227,10 @@ def test_a_known_dead_coin_is_present_in_the_panel(panel_csv):
     assert bitconnect.index.max().date() == date(2018, 1, 7)
 
 
-def test_a_panel_missing_its_dead_coins_is_rejected_at_pull_time(store):
+def test_a_panel_missing_its_dead_coins_is_rejected_at_pull_time(
+    store, survivors_only
+):
     """`cryptocurrency/historical` returns zero rows for delisted coins (ADR-0008)."""
-    survivors_only = b"\n".join(
-        line
-        for line in (FIXTURES / "cmc-panel-sample.csv").read_bytes().splitlines()
-        if b",827," not in line and b",6187," not in line
-    )
 
     def run(destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -215,7 +239,7 @@ def test_a_panel_missing_its_dead_coins_is_rejected_at_pull_time(store):
     with pytest.raises(SurvivorshipBiasedPanel, match="827"):
         pull_panel(store, run_pull=run, pulled_at_utc=PULLED_AT, window_start=FIXTURE_START)
 
-    assert not store.has(), "a biased panel must not reach data/raw/"
+    assert not store.has_panel(), "a biased panel must not reach data/raw/"
 
 
 # --- parsing --------------------------------------------------------------

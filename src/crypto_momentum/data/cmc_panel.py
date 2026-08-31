@@ -106,36 +106,45 @@ class PanelWindowNotCovered(Exception):
 PanelPuller = Callable[[Path], None]
 
 
+def stamped_date(pulled_at_utc: str) -> date:
+    """The UTC date of an ISO-seconds timestamp such as `2026-08-31T00:00:00Z`."""
+    return date.fromisoformat(pulled_at_utc[:10])
+
+
 class CmcPanelStore:
     """The one stored CoinMarketCap panel, in the append-only raw layer."""
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
 
+    def has_panel(self) -> bool:
+        return self.panel_path().exists()
+
     def panel_path(self) -> Path:
         return self.root / _PARTITION / _FILENAME
-
-    def has(self) -> bool:
-        return self.panel_path().exists()
 
     def write(
         self,
         payload: bytes,
         *,
         pulled_at_utc: str,
-        window_start: date = PANEL_START,
+        window_start: date,
         window_end: date | None = None,
     ) -> Path:
-        """Store the panel. Raises if it is already stored, or if it is biased.
+        """Store the panel. Raises if it is already stored, biased, or too short.
 
         `pulled_at_utc` is passed in rather than read from the clock, so the
-        stored manifest is reproducible. The survivorship check runs here rather
-        than only in `pull_panel`, so no path can put a biased panel on disk.
+        stored manifest is reproducible. Both checks run here rather than in
+        `pull_panel`, so no path can put a bad panel on disk — a manifest is
+        only worth trusting if nothing can write one it has not earned.
 
-        The manifest separates what was *asked for* (`window_start`,
-        `window_end`) from what actually came back (`first_snapshot`,
-        `last_snapshot`, `dead_assets_present`). Recording only the request
-        would let a short panel be stamped with a window it does not cover.
+        `window_start` has no default for the same reason. The manifest records
+        it as the window that was asked for, so the caller has to say what it
+        asked for rather than inherit a claim it never made.
+
+        The manifest separates the request (`window_start`, `window_end`) from
+        what actually came back (`first_snapshot`, `last_snapshot`,
+        `dead_assets_present`).
         """
         path = self.panel_path()
         if path.exists():
@@ -146,6 +155,7 @@ class CmcPanelStore:
             )
         observed = parse_panel_csv(payload)
         assert_survivorship_free(observed)
+        assert_covers_window(observed, window_start)
         listed = set(observed["cmc_id"].unique())
         return write_immutable(
             path,
@@ -158,9 +168,7 @@ class CmcPanelStore:
                 "timezone": TIMEZONE,
                 "interval": PANEL_INTERVAL,
                 "window_start": window_start.isoformat(),
-                "window_end": (
-                    window_end or date.fromisoformat(pulled_at_utc[:10])
-                ).isoformat(),
+                "window_end": (window_end or stamped_date(pulled_at_utc)).isoformat(),
                 "first_snapshot": observed.index.min().date().isoformat(),
                 "last_snapshot": observed.index.max().date().isoformat(),
                 "assets": int(observed["cmc_id"].nunique()),
@@ -185,7 +193,7 @@ class CmcPanelStore:
         return path.read_bytes()
 
     def manifest(self) -> dict[str, Any]:
-        if not self.has():
+        if not self.has_panel():
             raise PanelMissing(f"no panel in {self.panel_path().parent}")
         return read_manifest(self.panel_path())
 
@@ -211,10 +219,10 @@ def pull_panel(
     The window's end is taken from `pulled_at_utc` rather than read from the
     clock, so the same call reproduces the same request.
     """
-    if store.has():
+    if store.has_panel():
         return store.panel_path()
 
-    window_end = date.fromisoformat(pulled_at_utc[:10])
+    window_end = stamped_date(pulled_at_utc)
     puller = run_pull or rscript_puller(
         Path(repo_root) / _R_SCRIPT, window_start=window_start, window_end=window_end
     )
@@ -225,7 +233,8 @@ def pull_panel(
             raise PanelPullFailed(f"the pull produced no file at {destination}")
         payload = destination.read_bytes()
 
-    assert_covers_window(parse_panel_csv(payload), window_start)
+    # Both the survivorship and window checks live in `write`, which parses the
+    # payload once. Checking here too would parse the same bytes twice.
     return store.write(
         payload,
         pulled_at_utc=pulled_at_utc,

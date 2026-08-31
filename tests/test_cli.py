@@ -1,5 +1,6 @@
 """The CLI reports a refusal as a message and an exit code, not a traceback."""
 
+from datetime import date
 from pathlib import Path
 
 from crypto_momentum.cli import EXIT_REFUSED, main
@@ -64,7 +65,9 @@ def test_pulling_a_panel_that_is_already_stored_fetches_nothing(tmp_path, capsys
     panel = (
         Path(__file__).parent / "fixtures" / "coinmarketcap" / "cmc-panel-sample.csv"
     ).read_bytes()
-    CmcPanelStore(tmp_path / "data" / "raw").write(panel, pulled_at_utc="2026-08-31T00:00:00Z")
+    CmcPanelStore(tmp_path / "data" / "raw").write(
+        panel, pulled_at_utc="2026-08-31T00:00:00Z", window_start=date(2017, 1, 1)
+    )
 
     exit_code = main(["--repo-root", str(tmp_path), "pull-cmc-panel"])
 

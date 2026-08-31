@@ -136,6 +136,10 @@ class SymbolMap:
 def symbol_spells(panel: pd.DataFrame) -> tuple[SymbolSpell, ...]:
     """Derive each asset's naming history from the panel.
 
+    `panel` is a CoinMarketCap panel as `parse_panel_csv` returns it: one row is
+    one asset on one snapshot date, indexed on `ts_utc`, the snapshot's UTC
+    timestamp. Only `cmc_id` and `symbol` are read.
+
     One spell per contiguous run of snapshots on which an id carried the same
     symbol. A spell ends where the next one for that id begins, or — for an
     asset that simply stopped being listed — at the first snapshot on which it
@@ -231,19 +235,20 @@ def vendor_symbol_map(
     binance_bases: Iterable[str],
     *,
     repo_root: Path | str = ".",
-    overrides_path: Path | str | None = None,
 ) -> SymbolMap:
     """The mapping as it is actually used: panel spells, corrected by the table.
+
+    `panel` is a CoinMarketCap panel as `parse_panel_csv` returns it — one row
+    is one asset on one snapshot date, indexed on the snapshot's UTC timestamp.
+    The override table is read from `repo_root`.
 
     This is the entry point production code should call. Going through
     `build_symbol_map` alone silently accepts the vendor's snapshot grid as the
     boundary between two assets sharing a ticker, and for LUNA that grid is two
     days out from Binance's own rename.
     """
-    path = Path(overrides_path) if overrides_path else Path(repo_root) / DEFAULT_OVERRIDE_TABLE
-    return build_symbol_map(
-        symbol_spells(panel), binance_bases, overrides=load_overrides(path)
-    )
+    overrides = load_overrides(Path(repo_root) / DEFAULT_OVERRIDE_TABLE)
+    return build_symbol_map(symbol_spells(panel), binance_bases, overrides=overrides)
 
 
 def load_overrides(path: Path | str) -> tuple[VendorLink, ...]:
@@ -260,6 +265,12 @@ def load_overrides(path: Path | str) -> tuple[VendorLink, ...]:
 
     links = []
     for entry in document.get("link", []):
+        if not str(entry.get("reason", "")).strip():
+            raise MalformedOverrideTable(
+                f"{path} has a [[link]] with no reason: {entry!r}. A "
+                "hand-resolved link overrules what the panel says, so the file "
+                "has to record why rather than leaving it to be rediscovered."
+            )
         try:
             links.append(
                 VendorLink(

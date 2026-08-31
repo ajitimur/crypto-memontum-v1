@@ -14,6 +14,7 @@ import pytest
 from crypto_momentum.data.cmc_panel import parse_panel_csv
 from crypto_momentum.data.symbol_map import (
     AmbiguousTicker,
+    MalformedOverrideTable,
     SymbolSpell,
     VendorLink,
     build_symbol_map,
@@ -241,3 +242,21 @@ def test_the_mapping_as_used_still_matches_the_ordinary_assets(panel):
     assert as_used.binance_base_for(6187, date(2022, 5, 22)) == "SRM"
     assert 827 in as_used.unmatched_cmc_ids
     assert "PEPE" in as_used.unmatched_binance_bases
+
+
+def test_a_hand_resolved_link_without_a_reason_is_refused(tmp_path):
+    """The table overrules the panel, so it has to say why in the file itself."""
+    table = tmp_path / "vendor-symbol-map.toml"
+    table.write_text(
+        "[[link]]\n"
+        "cmc_id = 4172\n"
+        'binance_base = "LUNC"\n'
+        "valid_from = 2022-05-31\n"
+    )
+
+    with pytest.raises(MalformedOverrideTable, match="no reason"):
+        load_overrides(table)
+
+
+def test_every_link_in_the_committed_table_says_why_it_is_there():
+    assert load_overrides(REPO_ROOT / "configs" / "vendor-symbol-map.toml")

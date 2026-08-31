@@ -121,7 +121,7 @@ def _pull_cmc_panel(workspace: Workspace) -> int:
     The wall clock is read here, at the edge, and passed down as a parameter.
     """
     store = CmcPanelStore(workspace.raw_root)
-    already_stored = store.has()
+    already_stored = store.has_panel()
     path = pull_panel(
         store,
         pulled_at_utc=datetime.now(UTC).strftime(ISO_SECONDS),
