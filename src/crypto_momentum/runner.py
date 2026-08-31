@@ -17,11 +17,12 @@ import pandas as pd
 from crypto_momentum.config import CROSS_SECTIONAL, RunConfig, load_config
 from crypto_momentum.data.binance_archive import monthly_klines_file
 from crypto_momentum.data.cmc_panel import CmcPanelStore
-from crypto_momentum.data.fetch import UrlOpener, fetch_archive_file
+from crypto_momentum.data.fetch import ArchiveUnavailable, UrlOpener, fetch_archive_file
 from crypto_momentum.data.market_caps import market_cap_panel
 from crypto_momentum.data.raw_store import RawStore, RawWindowMissing
 from crypto_momentum.data.universe import (
     SymbolCoverage,
+    UniverseError,
     bar_span_from_bars,
     build_universe_panel,
     coverage_for_symbol,
@@ -36,7 +37,13 @@ from crypto_momentum.policy import (
 )
 from crypto_momentum.provenance import describe_head
 from crypto_momentum.results import ResultStore, RunRecord
-from crypto_momentum.sim.buy_and_hold import simulate_buy_and_hold
+from crypto_momentum.sim.benchmarks import (
+    BENCHMARK_SYMBOL,
+    btc_buy_and_hold,
+    cap_weighted_market,
+    deployment_hurdle,
+)
+from crypto_momentum.sim.buy_and_hold import NotEnoughBars, simulate_buy_and_hold
 from crypto_momentum.sim.cross_sectional import CrossSectionalRun, simulate_cross_sectional
 from crypto_momentum.sim.report import RunResult
 from crypto_momentum.sim.universe_policy import (
@@ -45,10 +52,25 @@ from crypto_momentum.sim.universe_policy import (
     apply_universe_policy,
     dollar_volume_from_bars,
 )
-from crypto_momentum.trials import TRIALS_FILENAME, append_trial
+from crypto_momentum.trials import TRIALS_FILENAME, append_trial, read_trials
 
 # Timestamps that cross the JSON boundary are second-resolution UTC throughout.
 ISO_SECONDS = "%Y-%m-%dT%H:%M:%SZ"
+
+
+@dataclass(frozen=True)
+class RunOutput:
+    """What one strategy path hands back to be recorded.
+
+    Four blocks rather than one dict, because they answer four different
+    questions: what came out, what window it came from, how the positions were
+    formed, and what the run is read against.
+    """
+
+    metrics: dict[str, Any]
+    window: dict[str, Any]
+    portfolio: dict[str, Any]
+    benchmarks: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -91,11 +113,11 @@ def run_config(
     provenance = describe_head(workspace.repo_root)
 
     if config.strategy_kind == CROSS_SECTIONAL:
-        metrics, window, portfolio = _run_cross_sectional(
+        output = _run_cross_sectional(
             config, workspace, run_at_utc=run_at_utc, open_url=open_url
         )
     else:
-        metrics, window, portfolio = _run_single_asset(
+        output = _run_single_asset(
             config, workspace, run_at_utc=run_at_utc, open_url=open_url
         )
 
@@ -106,9 +128,14 @@ def run_config(
         config=config,
         config_sha256=config_sha256,
         config_path=_relative_to_repo(config_path, workspace.repo_root),
-        metrics=metrics,
-        window=window,
-        portfolio=portfolio,
+        metrics=output.metrics,
+        window=output.window,
+        portfolio=output.portfolio,
+        benchmarks=output.benchmarks,
+        # This run included: the protocol asks for the count of configurations
+        # tried to reach a quoted number, and the number being quoted is one of
+        # them. The log is appended below, so the count is taken before it.
+        configurations_tried=len(read_trials(workspace.trials_path)) + 1,
     )
     ResultStore(workspace.results_root).write(record)
     append_trial(workspace.trials_path, record.trial_line())
@@ -121,19 +148,32 @@ def _run_single_asset(
     *,
     run_at_utc: str,
     open_url: UrlOpener | None,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> RunOutput:
     """The walking skeleton's path: one symbol, held from the fill to the end."""
     bars = load_bars(config, workspace, fetched_at_utc=run_at_utc, open_url=open_url)
     result = simulate_buy_and_hold(bars, cost_bps_per_side=config.cost_bps_per_side)
-    return (
-        metrics_of(result),
-        {
+    return RunOutput(
+        metrics=metrics_of(result),
+        window={
             "months": config.months(),
             "first_bar_ts_utc": _iso(bars.index[0]),
             "last_bar_ts_utc": _iso(bars.index[-1]),
             "n_bars": len(bars),
         },
-        {},
+        portfolio={},
+        benchmarks=_benchmarks(
+            result,
+            config=config,
+            workspace=workspace,
+            bars_by_symbol={config.symbol: bars} if config.symbol else {},
+            run_at_utc=run_at_utc,
+            open_url=open_url,
+            market=None,
+            market_unavailable=(
+                "a single-asset hold has no point-in-time Universe to weight by "
+                "capitalisation"
+            ),
+        ),
     )
 
 
@@ -143,7 +183,7 @@ def _run_cross_sectional(
     *,
     run_at_utc: str,
     open_url: UrlOpener | None,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> RunOutput:
     """The cross-sectional path, where the three layers meet.
 
     In order: the archive says which months each symbol ever published and the
@@ -205,10 +245,23 @@ def _run_cross_sectional(
         cost_bps_per_side=config.cost_bps_per_side,
     )
 
+    # The market portfolio runs on the same Universe, the same panel and the
+    # same cadence as the strategy, so the only difference between the two paths
+    # is that one of them ranked on the signal.
+    market = cap_weighted_market(
+        bars_by_symbol,
+        tradeable=after_policy.tradeable,
+        market_caps=caps,
+        lookback_days=config.lookback_days,
+        holding_days=config.holding_days,
+        max_cap_staleness_days=config.max_cap_staleness_days,
+        cost_bps_per_side=config.cost_bps_per_side,
+    )
+
     spans = [bars.index for bars in bars_by_symbol.values()]
-    return (
-        metrics_of(run.result),
-        {
+    return RunOutput(
+        metrics=metrics_of(run.result),
+        window={
             "months": config.months(),
             "first_bar_ts_utc": _iso(min(span[0] for span in spans)),
             "last_bar_ts_utc": _iso(max(span[-1] for span in spans)),
@@ -218,8 +271,109 @@ def _run_cross_sectional(
             },
             "universe": after_policy.metadata,
         },
-        run.to_metadata(),
+        portfolio=run.to_metadata(),
+        benchmarks=_benchmarks(
+            run.result,
+            config=config,
+            workspace=workspace,
+            bars_by_symbol=bars_by_symbol,
+            run_at_utc=run_at_utc,
+            open_url=open_url,
+            market=market,
+            market_unavailable=None,
+        ),
     )
+
+
+def _benchmarks(
+    result: RunResult,
+    *,
+    config: RunConfig,
+    workspace: Workspace,
+    bars_by_symbol: dict[str, pd.DataFrame],
+    run_at_utc: str,
+    open_url: UrlOpener | None,
+    market: CrossSectionalRun | None,
+    market_unavailable: str | None,
+) -> dict[str, Any]:
+    """What the run is read against, per ADR-0005.
+
+    BTC buy-and-hold is computed on every run, whatever the strategy, because it
+    is the hurdle and not an option. Where it cannot be computed — the archive
+    published no Bitcoin over the window — the block says so and the hurdle
+    fails, rather than the field going quietly missing.
+    """
+    btc, btc_unavailable = _btc_over_the_same_window(
+        result,
+        config=config,
+        workspace=workspace,
+        bars_by_symbol=bars_by_symbol,
+        run_at_utc=run_at_utc,
+        open_url=open_url,
+    )
+    return {
+        "btc_buy_and_hold": {
+            "symbol": BENCHMARK_SYMBOL,
+            "computed": btc is not None,
+            **({"reason": btc_unavailable} if btc is None else metrics_of(btc)),
+        },
+        "cap_weighted_market": {
+            "computed": market is not None,
+            **(
+                {"reason": market_unavailable}
+                if market is None
+                else {
+                    **metrics_of(market.result),
+                    "n_rebalances": market.n_rebalances,
+                    "mean_n_positions": market.mean_n_positions,
+                    "mean_rebalance_turnover": market.mean_rebalance_turnover,
+                }
+            ),
+        },
+        "deployment_hurdle": deployment_hurdle(result, btc=btc).to_metadata(),
+    }
+
+
+def _btc_over_the_same_window(
+    result: RunResult,
+    *,
+    config: RunConfig,
+    workspace: Workspace,
+    bars_by_symbol: dict[str, pd.DataFrame],
+    run_at_utc: str,
+    open_url: UrlOpener | None,
+) -> tuple[RunResult | None, str | None]:
+    """BTC bought and held over the run's own window, or why it could not be.
+
+    The hold starts at the *strategy's* Decision Bar rather than the config's
+    first bar: a lookback the strategy spends warming up is not a window BTC was
+    held over, and comparing a hold over more days to one over fewer is not the
+    comparison ADR-0005 asks for.
+
+    The bars are reused when the run already loaded them, and fetched through
+    the same raw-then-derived path when it did not, so the hurdle never reads a
+    price the run itself could not have.
+    """
+    bars = bars_by_symbol.get(BENCHMARK_SYMBOL)
+    if bars is None:
+        try:
+            loaded = _load_symbol_bars(
+                BENCHMARK_SYMBOL, config, workspace, fetched_at_utc=run_at_utc, open_url=open_url
+            )
+        except (ArchiveUnavailable, UniverseError) as error:
+            return None, f"{BENCHMARK_SYMBOL} could not be read: {error}"
+        if loaded is None:
+            return None, (
+                f"the archive publishes no {config.interval} bars for "
+                f"{BENCHMARK_SYMBOL} in {config.start_month} to {config.end_month}"
+            )
+        bars, _ = loaded
+
+    held = bars.loc[bars.index >= result.decision_ts_utc]
+    try:
+        return btc_buy_and_hold(held, cost_bps_per_side=config.cost_bps_per_side), None
+    except NotEnoughBars as error:
+        return None, f"{BENCHMARK_SYMBOL} has no window to be held over: {error}"
 
 
 def load_cross_section(
@@ -241,27 +395,17 @@ def load_cross_section(
     Its absence is visible in the Universe metadata, which counts the symbols
     that made it in.
     """
-    raw_store = RawStore(workspace.raw_root)
-    derived_store = DerivedStore(workspace.derived_root)
     wanted = set(config.months())
 
     bars_by_symbol: dict[str, pd.DataFrame] = {}
     coverages: list[SymbolCoverage] = []
     for symbol in config.universe_symbols:
-        coverage = coverage_for_symbol(symbol, config.interval, open_url=open_url)
-        months = [month for month in config.months() if month in set(coverage.months)]
-        if not months:
+        loaded = _load_symbol_bars(
+            symbol, config, workspace, fetched_at_utc=fetched_at_utc, open_url=open_url
+        )
+        if loaded is None:
             continue
-        for month in months:
-            archive_file = monthly_klines_file(symbol, config.interval, month)
-            if raw_store.has(archive_file):
-                continue
-            payload, digest = fetch_archive_file(archive_file, open_url=open_url)
-            raw_store.write(
-                archive_file, payload, sha256=digest, fetched_at_utc=fetched_at_utc
-            )
-        bars = build_daily_bars(raw_store, symbol, config.interval, months)
-        derived_store.write_bars(symbol, config.interval, bars)
+        bars, coverage = loaded
         bars_by_symbol[symbol] = bars
         # The coverage handed to the panel is clipped to the run's own window, so
         # a symbol is not marked tradeable on months this run never looked at.
@@ -269,7 +413,9 @@ def load_cross_section(
             SymbolCoverage(
                 symbol=symbol,
                 interval=coverage.interval,
-                months=tuple(months),
+                months=tuple(
+                    month for month in config.months() if month in set(coverage.months)
+                ),
                 daily_only_dates=tuple(
                     day for day in coverage.daily_only_dates if day[:7] in wanted
                 ),
@@ -282,6 +428,42 @@ def load_cross_section(
             f"{config.end_month}"
         )
     return bars_by_symbol, coverages
+
+
+def _load_symbol_bars(
+    symbol: str,
+    config: RunConfig,
+    workspace: Workspace,
+    *,
+    fetched_at_utc: str,
+    open_url: UrlOpener | None = None,
+) -> tuple[pd.DataFrame, SymbolCoverage] | None:
+    """One symbol's daily bars over the config's window, and its archive coverage.
+
+    Only the months the archive actually publishes the symbol in are fetched, and
+    only those not already in `data/raw/`: raw data is append-only, and asking a
+    delisted asset for a month after it stopped trading is a 404 that reads like
+    a network fault.
+
+    `None` when the archive published nothing for the symbol inside the window.
+    """
+    coverage = coverage_for_symbol(symbol, config.interval, open_url=open_url)
+    months = [month for month in config.months() if month in set(coverage.months)]
+    if not months:
+        return None
+
+    raw_store = RawStore(workspace.raw_root)
+    for month in months:
+        archive_file = monthly_klines_file(symbol, config.interval, month)
+        if raw_store.has(archive_file):
+            continue
+        payload, digest = fetch_archive_file(archive_file, open_url=open_url)
+        raw_store.write(
+            archive_file, payload, sha256=digest, fetched_at_utc=fetched_at_utc
+        )
+    bars = build_daily_bars(raw_store, symbol, config.interval, months)
+    DerivedStore(workspace.derived_root).write_bars(symbol, config.interval, bars)
+    return bars, coverage
 
 
 def _window_start(config: RunConfig) -> pd.Timestamp:
@@ -389,7 +571,15 @@ def metrics_of(result: RunResult) -> dict[str, Any]:
         "ann_return_net": result.ann_return_net,
         "ann_vol_net": result.ann_vol_net,
         "sharpe_net": result.sharpe_net,
+        # ADR-0002: the mean log return and its Newey-West t-statistic decide;
+        # the mean return is reported beside them for comparison with published
+        # work, and their disagreeing in sign is itself a reported finding.
+        "mean_return_daily_net": result.mean_return_daily_net,
         "mean_log_return_daily_net": result.mean_log_return_daily_net,
+        "mean_log_return_t_stat": result.mean_log_return_t_stat,
+        "newey_west_lags": result.newey_west_lags,
+        "mean_return_sign_divergence": result.mean_return_sign_divergence,
+        "clears_profitability_bar": result.clears_profitability_bar,
         "max_drawdown": result.max_drawdown,
         "max_drawdown_peak_ts_utc": _iso(result.max_drawdown_peak_ts_utc),
         "max_drawdown_trough_ts_utc": _iso(result.max_drawdown_trough_ts_utc),

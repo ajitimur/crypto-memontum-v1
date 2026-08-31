@@ -229,3 +229,71 @@ def test_the_config_is_fingerprinted_so_an_edited_config_is_a_different_trial(
 
     assert first.config_sha256 != second.config_sha256
     assert second.metrics["net_return"] > first.metrics["net_return"]
+
+
+def test_the_recorded_result_carries_the_whole_reporting_block(
+    workspace, config_path, archive
+):
+    """`docs/agents/quant-research.md` names what a result reports. All of it lands."""
+    record = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    assert set(record.metrics) >= {
+        "ann_return_net",
+        "ann_vol_net",
+        "sharpe_net",
+        "mean_return_daily_net",
+        "mean_log_return_daily_net",
+        "mean_log_return_t_stat",
+        "newey_west_lags",
+        "mean_return_sign_divergence",
+        "clears_profitability_bar",
+        "max_drawdown",
+        "max_drawdown_peak_ts_utc",
+        "max_drawdown_trough_ts_utc",
+        "liquidation_count",
+        "liquidation_dates",
+        "cost_drag_annualised",
+        "cost_drag_as_fraction_of_gross",
+    }
+    # 58 marks, so floor(4 * (58/100) ** (2/9)) lags.
+    assert record.metrics["newey_west_lags"] == 3
+
+
+def test_the_result_counts_the_configurations_tried_to_reach_it(
+    workspace, config_path, archive
+):
+    """The count the protocol requires beside every quoted number, on the result
+    itself rather than only in the log a reader would have to go and count."""
+    first = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+    second = run_config(
+        config_path, workspace, run_at_utc="2026-09-01T09:00:00Z", open_url=archive
+    )
+
+    assert first.configurations_tried == 1
+    assert second.configurations_tried == 2
+    assert read_trials(workspace.trials_path)[-1]["configurations_tried"] == 2
+
+
+def test_btc_buy_and_hold_is_computed_on_every_run(workspace, config_path, archive):
+    """ADR-0005: the hurdle is not a thing you opt into, it is on every result."""
+    record = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    btc = record.benchmarks["btc_buy_and_hold"]
+    assert btc["symbol"] == "BTCUSDT"
+    # The run is BTC itself here, so the hurdle is the run: it ties, and a tie
+    # is not "above", which is what makes the comparison strict.
+    assert btc["net_return"] == pytest.approx(record.metrics["net_return"])
+    assert record.benchmarks["deployment_hurdle"]["sharpe_above_btc"] is False
+    assert record.benchmarks["deployment_hurdle"]["clears"] is False
+
+
+def test_a_single_asset_run_says_why_it_has_no_market_portfolio(
+    workspace, config_path, archive
+):
+    """A cap-weighted market needs a Universe, and a one-symbol hold has none.
+    The result says that rather than leaving the field silently absent."""
+    record = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    market = record.benchmarks["cap_weighted_market"]
+    assert market["computed"] is False
+    assert market["reason"]
