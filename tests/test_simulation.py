@@ -8,6 +8,7 @@ import pytest
 
 import crypto_momentum.sim as sim_package
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars, simulate_buy_and_hold
+from crypto_momentum.sim.report import HALTED, LIQUIDATED, WINDOW_END
 
 
 def bars_from(rows) -> pd.DataFrame:
@@ -142,6 +143,152 @@ def test_mean_log_return_is_reported_because_it_is_the_profitability_bar():
     assert result.mean_log_return_daily_net == pytest.approx(math.log(1.10))
 
 
+def bars_with_volume(rows) -> pd.DataFrame:
+    """Bars as `open, close, volume` triples, so a bar can print no trade at all."""
+    index = pd.date_range("2021-01-01", periods=len(rows), freq="D", tz="UTC", name="ts_utc")
+    return pd.DataFrame(
+        [
+            {"open": o, "high": max(o, c), "low": min(o, c), "close": c, "volume": v}
+            for o, c, v in rows
+        ],
+        index=index,
+    )
+
+
+def test_a_run_that_reaches_the_end_of_its_window_says_so_and_is_not_liquidated():
+    result = simulate_buy_and_hold(COMPOUNDING, cost_bps_per_side=0.0)
+
+    assert result.exit_reason == WINDOW_END
+    assert not result.liquidated
+    assert result.liquidation_ts_utc is None
+
+
+def test_an_asset_that_halts_mid_hold_exits_at_its_last_tradeable_price():
+    """The survivorship edge: a Halt is an exit, not a hold through a frozen price."""
+    bars = bars_with_volume(
+        [
+            (100.0, 100.0, 7.0),  # decision bar
+            (100.0, 110.0, 7.0),
+            (110.0, 121.0, 7.0),
+            (121.0, 121.0, 0.0),  # halted: the price prints, nothing trades
+            (121.0, 500.0, 0.0),
+        ]
+    )
+
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=0.0)
+
+    assert result.exit_reason == HALTED
+    assert result.exit_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
+    assert result.exit_price == pytest.approx(121.0)
+    assert result.n_marks == 2
+    assert result.net_return == pytest.approx(0.21)
+
+
+def test_a_price_that_prints_again_after_the_halt_cannot_be_sold_into():
+    """A post-halt print is not an exit we could have chosen without foresight."""
+    bars = bars_with_volume(
+        [
+            (100.0, 100.0, 7.0),  # decision bar
+            (100.0, 110.0, 7.0),
+            (110.0, 110.0, 0.0),
+            (110.0, 400.0, 7.0),
+        ]
+    )
+
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=0.0)
+
+    assert result.exit_price == pytest.approx(110.0)
+    assert result.net_return == pytest.approx(0.10)
+
+
+def test_an_asset_that_trades_to_zero_liquidates_the_run_on_the_day_it_does():
+    """ADR-0004 leaves one route to a 100% loss in long-only spot: the asset itself
+    goes to nothing. This is the strategy wired end to end through that route."""
+    bars = bars_with_volume(
+        [
+            (100.0, 100.0, 7.0),  # decision bar
+            (100.0, 80.0, 7.0),
+            (80.0, 0.0, 7.0),  # traded at nothing
+            (0.0, 0.0, 7.0),
+        ]
+    )
+
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=100.0)
+
+    assert result.liquidated
+    assert result.exit_reason == LIQUIDATED
+    assert result.liquidation_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
+    assert result.exit_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
+    assert result.net_return == pytest.approx(-1.0)
+    assert result.equity_net.iloc[-1] == 0.0
+
+
+def test_the_simulator_liquidates_on_the_daily_path_though_its_boundary_return_does_not():
+    """ADR-0001's fixture, driven through the strategy rather than the mark alone.
+
+    The asset trades to nothing mid-window and prints again after. A simulator
+    that took the window's boundary return would book -50% and carry on; the
+    daily path reaches zero on the way and the run ends there.
+    """
+    bars = bars_with_volume(
+        [
+            (100.0, 100.0, 7.0),  # decision bar
+            (100.0, 80.0, 7.0),
+            (80.0, 0.0, 7.0),  # traded at nothing
+            (0.0, 50.0, 7.0),  # and priced again afterwards
+        ]
+    )
+    boundary_return = 50.0 / 100.0 - 1.0
+    assert boundary_return == pytest.approx(-0.50)
+
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=0.0)
+
+    assert result.liquidated
+    assert result.liquidation_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
+    assert result.exit_ts_utc == pd.Timestamp("2021-01-03T00:00:00Z")
+    assert result.n_marks == 2
+    assert result.net_return == pytest.approx(-1.0)
+
+
+def test_a_liquidated_run_does_not_report_its_wipeout_as_cost_drag():
+    """Cost Drag is the gap between a run and the same run without costs. Once the
+    position is gone there is no such run to compare against."""
+    bars = bars_with_volume(
+        [
+            (100.0, 100.0, 7.0),  # decision bar
+            (100.0, 80.0, 7.0),
+            (80.0, 0.0, 7.0),
+        ]
+    )
+
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=100.0)
+
+    assert result.cost_drag_annualised is None
+    assert result.cost_drag_as_fraction_of_gross is None
+
+
+def test_an_asset_that_halts_before_the_fill_has_nowhere_to_fill():
+    bars = bars_with_volume([(100.0, 100.0, 7.0), (100.0, 110.0, 0.0)])
+
+    with pytest.raises(NotEnoughBars):
+        simulate_buy_and_hold(bars, cost_bps_per_side=0.0)
+
+
+def test_the_exit_cost_is_still_charged_when_the_asset_halts():
+    """The position is sold at the last tradeable price, and selling costs."""
+    bars = bars_with_volume(
+        [
+            (100.0, 100.0, 7.0),  # decision bar
+            (100.0, 110.0, 7.0),
+            (110.0, 110.0, 0.0),
+        ]
+    )
+
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=100.0)
+
+    assert result.net_return == pytest.approx(0.99 * 1.10 * 0.99 - 1)
+
+
 def test_a_window_with_no_bar_after_the_decision_bar_cannot_be_filled():
     with pytest.raises(NotEnoughBars):
         simulate_buy_and_hold(COMPOUNDING.iloc[:1], cost_bps_per_side=0.0)
@@ -165,6 +312,11 @@ def test_the_same_bars_always_produce_the_same_result():
 
 ALLOWED_SIM_IMPORTS = {"__future__", "dataclasses", "math", "typing", "numpy", "pandas"}
 
+# A module inside the core may import its siblings — the core is a package, not
+# a single file — but nothing else under `crypto_momentum`, since the layers
+# above it are exactly the ones that open sockets and files.
+SIM_PACKAGE = "crypto_momentum.sim"
+
 # Reaching the outside world without an import: these are the ways in.
 FORBIDDEN_SIM_CALLS = {"open", "__import__", "eval", "exec", "compile", "input"}
 
@@ -177,11 +329,16 @@ def test_the_simulation_core_reaches_for_no_network_filesystem_or_clock():
         tree = ast.parse(module_path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                imported = {alias.name.split(".")[0] for alias in node.names}
+                modules = {alias.name for alias in node.names}
             elif isinstance(node, ast.ImportFrom):
-                imported = {(node.module or "").split(".")[0]}
+                modules = {node.module or ""}
             else:
                 continue
+            imported = {
+                module.split(".")[0]
+                for module in modules
+                if not module.startswith(f"{SIM_PACKAGE}.") and module != SIM_PACKAGE
+            }
             forbidden = imported - ALLOWED_SIM_IMPORTS
             assert not forbidden, f"{module_path.name} imports {sorted(forbidden)}"
 

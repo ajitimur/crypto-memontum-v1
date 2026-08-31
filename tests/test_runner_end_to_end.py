@@ -101,6 +101,27 @@ def test_the_result_matches_the_prices_in_the_recorded_archive(
     assert record.metrics["n_marks"] == 58
 
 
+def test_the_recorded_result_carries_the_liquidation_line_of_the_reporting_block(
+    workspace, config_path, archive
+):
+    """ADR-0001. Long-only spot cannot liquidate, and the result says so explicitly."""
+    record = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    assert record.metrics["liquidation_count"] == 0
+    assert record.metrics["liquidation_dates"] == []
+    assert record.metrics["exit_reason"] == "window_end"
+
+
+def test_the_run_is_marked_on_every_day_of_the_window_not_only_at_its_boundaries(
+    workspace, config_path, archive
+):
+    record = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    # 59 bars from 2021-01-01 to 2021-02-28, less the Decision Bar.
+    assert record.window["n_bars"] == 59
+    assert record.metrics["n_marks"] == record.window["n_bars"] - 1
+
+
 def test_every_run_is_appended_to_the_trials_log(workspace, config_path, archive):
     run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
     run_config(config_path, workspace, run_at_utc="2026-09-01T09:00:00Z", open_url=archive)

@@ -49,6 +49,33 @@ def test_trials_on_a_repository_that_has_never_run_reports_zero(tmp_path, capsys
     assert "0 configurations tried" in capsys.readouterr().out
 
 
+def test_a_trial_that_survived_reports_liquidation_as_an_explicit_none(tmp_path, capsys):
+    """ADR-0001: the reporting block says "none", it does not stay silent."""
+    append_trial(tmp_path / "trials.jsonl", {"config_name": "one", "liquidation_dates": []})
+
+    assert main(["--repo-root", str(tmp_path), "trials"]) == 0
+    assert "liquidation=none" in capsys.readouterr().out
+
+
+def test_a_liquidated_trial_reports_its_count_and_dates(tmp_path, capsys):
+    append_trial(
+        tmp_path / "trials.jsonl",
+        {"config_name": "blown-up", "liquidation_dates": ["2021-07-07T00:00:00Z"]},
+    )
+
+    assert main(["--repo-root", str(tmp_path), "trials"]) == 0
+    out = capsys.readouterr().out
+    assert "liquidation=1 event" in out
+    assert "2021-07-07T00:00:00Z" in out
+
+
+def test_a_trial_logged_before_daily_marking_does_not_claim_it_survived(tmp_path, capsys):
+    append_trial(tmp_path / "trials.jsonl", {"config_name": "older", "net_return": 0.1})
+
+    assert main(["--repo-root", str(tmp_path), "trials"]) == 0
+    assert "liquidation=not recorded" in capsys.readouterr().out
+
+
 def test_a_single_trial_is_reported_in_the_singular(tmp_path, capsys):
     append_trial(tmp_path / "trials.jsonl", {"config_name": "only", "net_return": 0.1})
 
