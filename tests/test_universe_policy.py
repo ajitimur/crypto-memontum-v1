@@ -114,6 +114,17 @@ def test_a_symbol_listed_twice_is_rejected():
         exclusion_list([entry("USTUSDT"), entry("USTUSDT")])
 
 
+def test_an_entry_whose_symbol_and_base_asset_disagree_is_rejected():
+    """An entry that names one pair and a different asset excludes neither cleanly."""
+    with pytest.raises(PolicyError, match="base asset"):
+        exclusion_list([{**entry("USTUSDT"), "base_asset": "LUNA"}])
+
+
+def test_a_floor_with_a_nonsense_window_is_rejected_at_construction():
+    with pytest.raises(PolicyError, match="window_days"):
+        LiquidityFloor(floor_usd=100.0, window_days=0)
+
+
 def test_a_list_without_a_version_is_rejected():
     with pytest.raises(PolicyError, match="version"):
         ExclusionList.from_document({"as_of": "2021-01-01", "entry": []})
@@ -349,8 +360,8 @@ def test_dollar_volume_is_built_from_the_bars_of_each_symbol():
 
     dollar_volume = dollar_volume_from_bars(bars)
 
-    assert list(dollar_volume["AUSDT"]) == [30.0, 80.0]
-    assert list(dollar_volume["BUSDT"]) == [5.0, 12.0]
+    assert list(dollar_volume["AUSDT"]) == pytest.approx([30.0, 80.0])
+    assert list(dollar_volume["BUSDT"]) == pytest.approx([5.0, 12.0])
 
 
 def test_a_symbol_absent_on_a_date_carries_no_dollar_volume_there():
@@ -366,6 +377,35 @@ def test_a_symbol_absent_on_a_date_carries_no_dollar_volume_there():
 
     assert dollar_volume["BUSDT"].isna().iloc[0]
     assert dollar_volume["AUSDT"].isna().iloc[-1]
+
+
+# --- An asset that goes dark mid-sample -------------------------------------
+
+
+def test_an_asset_that_stops_trading_mid_sample_stays_out_after_its_last_bar():
+    """SRMUSDT's shape: coverage ends mid-window, and no policy gate revives it."""
+    panel = panel_of(
+        coverage("BTCUSDT", "2021-01", "2021-12"),
+        coverage("SRMUSDT", "2021-01", "2021-06"),
+        end="2021-12-31",
+    )
+    dates = panel.tradeable.index
+    dollar_volume = flat_volume(dates, ["BTCUSDT", "SRMUSDT"], 5_000_000)
+
+    policy = apply_universe_policy(
+        panel,
+        exclusions=EMPTY_LIST,
+        bracket=BINANCE_FULL,
+        dollar_volume=dollar_volume,
+        floor=LiquidityFloor(floor_usd=100_000.0),
+    )
+
+    # The volume column runs the whole year, past SRMUSDT's last bar, so this
+    # also pins that the floor can only remove: a stale volume row must not put
+    # a delisted asset back into the Universe.
+    assert policy.tradeable_on("2021-06-30") == ("BTCUSDT", "SRMUSDT")
+    assert policy.tradeable_on("2021-07-01") == ("BTCUSDT",)
+    assert not policy.tradeable["SRMUSDT"].loc["2021-07-01":].any()
 
 
 # --- The bracket, reported both ways ----------------------------------------
