@@ -21,7 +21,8 @@ from crypto_momentum.data.raw_store import RawStore
 from crypto_momentum.derive import DerivedStore, rebuild_daily_bars
 from crypto_momentum.provenance import describe_head
 from crypto_momentum.results import ResultStore, RunRecord
-from crypto_momentum.sim.buy_and_hold import RunResult, simulate_buy_and_hold
+from crypto_momentum.sim.buy_and_hold import simulate_buy_and_hold
+from crypto_momentum.sim.report import RunResult
 from crypto_momentum.trials import TRIALS_FILENAME, append_trial
 
 # Timestamps that cross the JSON boundary are second-resolution UTC throughout.
@@ -139,6 +140,11 @@ def metrics_of(result: RunResult) -> dict[str, Any]:
         "decision_ts_utc": _iso(result.decision_ts_utc),
         "entry_ts_utc": _iso(result.entry_ts_utc),
         "exit_ts_utc": _iso(result.exit_ts_utc),
+        "exit_reason": result.exit_reason,
+        # ADR-0001: the reporting block carries liquidation count and dates, and
+        # an empty list is the explicit "none" — not a missing field.
+        "liquidation_count": len(result.liquidation_dates),
+        "liquidation_dates": [_iso(ts) for ts in result.liquidation_dates],
         "entry_price": result.entry_price,
         "exit_price": result.exit_price,
         "n_marks": result.n_marks,

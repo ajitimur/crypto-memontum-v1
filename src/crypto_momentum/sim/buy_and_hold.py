@@ -4,64 +4,30 @@ The walking skeleton's strategy. Depth arrives with the cross-sectional signal;
 what this establishes is the shape every later strategy fills in: a signal formed
 on a Decision Bar, a fill at the next bar's open, a daily mark through the hold,
 and costs charged inside the path rather than deducted from the answer.
+
+The mark itself, the Liquidation trigger and the exit for an asset that stops
+trading live in `marking`; the reading of the resulting path lives in `report`.
+Both are strategy-agnostic, and this module is what a strategy is: how positions
+are formed, and nothing else.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass
-
-import numpy as np
 import pandas as pd
 
-# Crypto trades every calendar day, so a year is 365 marks and not 252.
-MARKS_PER_YEAR = 365
+from crypto_momentum.sim.marking import mark_daily, stops_trading_at
+from crypto_momentum.sim.report import (
+    STOPPED_TRADING,
+    WINDOW_END,
+    RunResult,
+    summarise,
+)
 
 BPS = 1e-4
 
-# An annualised volatility below this is floating-point noise on a flat path,
-# not risk. Dividing by it would report a Sharpe in the trillions.
-FLAT_PATH_VOL = 1e-12
-
 
 class NotEnoughBars(Exception):
-    """A window with no bar after the Decision Bar has nowhere to fill."""
-
-
-@dataclass(frozen=True)
-class RunResult:
-    """One simulated run of one configuration.
-
-    Both annualised figures extrapolate the window, so a short window produces
-    large ones; `cost_drag_as_fraction_of_gross` is the scale-free reading and is
-    the one `docs/agents/quant-research.md` puts a ceiling on.
-
-    `equity_net` is the daily-marked net equity curve, indexed on `ts_utc` and
-    starting at the fill bar; equity is 1.0 at the Decision Bar by construction.
-    Every return here is net of `cost_bps_per_side` charged on both legs, except
-    the two fields named `gross`.
-    """
-
-    decision_ts_utc: pd.Timestamp
-    entry_ts_utc: pd.Timestamp
-    exit_ts_utc: pd.Timestamp
-    entry_price: float
-    exit_price: float
-    n_marks: int
-    cost_bps_per_side: float
-    equity_net: pd.Series
-    gross_return: float
-    net_return: float
-    ann_return_gross: float
-    ann_return_net: float
-    ann_vol_net: float
-    sharpe_net: float | None
-    mean_log_return_daily_net: float
-    max_drawdown: float
-    max_drawdown_peak_ts_utc: pd.Timestamp | None
-    max_drawdown_trough_ts_utc: pd.Timestamp | None
-    cost_drag_annualised: float
-    cost_drag_as_fraction_of_gross: float | None
+    """A window with no tradeable bar after the Decision Bar has nowhere to fill."""
 
 
 def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> RunResult:
@@ -72,6 +38,10 @@ def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> Ru
     is the Decision Bar and is never traded on — the fill is at the *next* bar's
     open, so no information from the Decision Bar's own session is used.
 
+    Every day held is marked, per ADR-0001, and the hold ends early if the asset
+    stops trading: the exit is then its last tradeable price, not a later print
+    nobody could have sold into.
+
     `cost_bps_per_side` is charged on the buy and again on the sell, per ADR-0007.
     """
     if len(bars) < 2:
@@ -79,107 +49,37 @@ def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> Ru
             f"need a Decision Bar plus at least one bar to fill on, got {len(bars)}"
         )
 
-    held = bars.iloc[1:]
+    held = _tradeable_hold(bars.iloc[1:])
+    exit_reason = WINDOW_END if len(held) == len(bars) - 1 else STOPPED_TRADING
     cost = cost_bps_per_side * BPS
-    entry_price = float(bars["open"].iloc[1])
-    exit_price = float(bars["close"].iloc[-1])
+    entry_price = float(held["open"].iloc[0])
+    closes = held["close"].astype(float)
 
-    # Equity is 1.0 at the Decision Bar. The buy-side cost is paid at the fill,
-    # so every subsequent daily mark is already net of it; the sell-side cost
-    # lands on the final mark, where the position is actually closed.
-    price_relative = held["close"].astype(float) / entry_price
-    equity_net = (1.0 - cost) * price_relative
-    equity_net = equity_net.copy()
-    equity_net.iloc[-1] = equity_net.iloc[-1] * (1.0 - cost)
-    equity_net.name = "equity_net"
+    # The first mark is measured from the fill price, every later one from the
+    # previous close, so the path compounds day by day rather than jumping from
+    # boundary to boundary.
+    mark_returns = closes / closes.shift(1).fillna(entry_price) - 1.0
+    path = mark_daily(mark_returns, entry_cost=cost, exit_cost=cost)
 
-    gross_return = exit_price / entry_price - 1.0
-    net_return = float(equity_net.iloc[-1]) - 1.0
-    n_marks = len(equity_net)
-    years = n_marks / MARKS_PER_YEAR
-
-    daily_net = _daily_returns(equity_net)
-    ann_vol_net = float(daily_net.std(ddof=1) * math.sqrt(MARKS_PER_YEAR)) if n_marks > 1 else 0.0
-    ann_return_net = _annualise(net_return, years)
-    ann_return_gross = _annualise(gross_return, years)
-    peak_ts, trough_ts, max_drawdown = _max_drawdown(equity_net)
-
-    cost_drag_annualised = ann_return_gross - ann_return_net
-    return RunResult(
+    return summarise(
+        path,
         decision_ts_utc=bars.index[0],
-        entry_ts_utc=held.index[0],
-        exit_ts_utc=held.index[-1],
         entry_price=entry_price,
-        exit_price=exit_price,
-        n_marks=n_marks,
+        exit_price=float(closes.loc[path.equity_net.index[-1]]),
         cost_bps_per_side=cost_bps_per_side,
-        equity_net=equity_net,
-        gross_return=gross_return,
-        net_return=net_return,
-        ann_return_gross=ann_return_gross,
-        ann_return_net=ann_return_net,
-        ann_vol_net=ann_vol_net,
-        sharpe_net=_sharpe(daily_net, ann_vol_net),
-        mean_log_return_daily_net=float(np.log1p(daily_net).mean()),
-        max_drawdown=max_drawdown,
-        max_drawdown_peak_ts_utc=peak_ts,
-        max_drawdown_trough_ts_utc=trough_ts,
-        cost_drag_annualised=cost_drag_annualised,
-        cost_drag_as_fraction_of_gross=_fraction_of_gross(
-            cost_drag_annualised, ann_return_gross
-        ),
+        exit_reason=exit_reason,
     )
 
 
-def _fraction_of_gross(cost_drag_annualised: float, ann_return_gross: float) -> float | None:
-    """Cost Drag as a share of gross annualised return.
-
-    `docs/agents/quant-research.md` caps this at one third. `None` when gross
-    return is not positive, because a share of a loss is not a meaningful ratio.
-    """
-    if ann_return_gross <= 0.0:
-        return None
-    return cost_drag_annualised / ann_return_gross
-
-
-def _daily_returns(equity_net: pd.Series) -> pd.Series:
-    """Simple daily returns, with equity 1.0 at the Decision Bar as the first base."""
-    previous = equity_net.shift(1)
-    previous.iloc[0] = 1.0
-    return equity_net / previous - 1.0
-
-
-def _annualise(total_return: float, years: float) -> float:
-    """Geometric annualisation. A total loss annualises to -100%, not to a NaN."""
-    growth = 1.0 + total_return
-    if growth <= 0.0:
-        return -1.0
-    return growth ** (1.0 / years) - 1.0
-
-
-def _sharpe(daily_net: pd.Series, ann_vol_net: float) -> float | None:
-    """Annualised Sharpe at a zero risk-free rate.
-
-    `None` when the path has no dispersion — a ratio with a vanishing denominator
-    is not a large Sharpe, it is an undefined one, and reporting it as a number
-    invites a comparison that means nothing.
-    """
-    if ann_vol_net < FLAT_PATH_VOL or not math.isfinite(ann_vol_net):
-        return None
-    return float(daily_net.mean() * MARKS_PER_YEAR / ann_vol_net)
-
-
-def _max_drawdown(
-    equity_net: pd.Series,
-) -> tuple[pd.Timestamp | None, pd.Timestamp | None, float]:
-    """Worst peak-to-trough fall in the daily-marked net curve, with its dates."""
-    running_peak = equity_net.cummax()
-    drawdown = equity_net / running_peak - 1.0
-    trough_ts = drawdown.idxmin()
-    worst = float(drawdown.min())
-    if worst == 0.0:
-        return None, None, 0.0
-    peak_value = float(running_peak.loc[trough_ts])
-    up_to_trough = equity_net.loc[:trough_ts]
-    peak_ts = up_to_trough[up_to_trough == peak_value].index[0]
-    return peak_ts, trough_ts, worst
+def _tradeable_hold(held: pd.DataFrame) -> pd.DataFrame:
+    """The held bars up to, but not including, the bar the asset stopped trading on."""
+    halt_ts = stops_trading_at(held)
+    if halt_ts is None:
+        return held
+    tradeable = held.loc[held.index < halt_ts]
+    if tradeable.empty:
+        raise NotEnoughBars(
+            f"the asset stopped trading at {halt_ts.date()}, the first bar after the "
+            "Decision Bar, so the position has no price to fill at"
+        )
+    return tradeable
