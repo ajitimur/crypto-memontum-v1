@@ -43,6 +43,25 @@ BRACKETS = (BINANCE_FULL, TOKOCRYPTO)
 
 CATEGORIES = ("stablecoin", "wrapped_asset")
 
+
+@dataclass(frozen=True)
+class Bracket:
+    """One end of the Universe bracket: which bound it is, and what it needs.
+
+    A table rather than a condition repeated at each use, so a third venue is one
+    row here instead of three branches scattered through the module.
+    """
+
+    name: str
+    bound: str
+    needs_venue_listing: bool
+
+
+_BRACKET_BY_NAME = {
+    BINANCE_FULL: Bracket(BINANCE_FULL, bound="upper", needs_venue_listing=False),
+    TOKOCRYPTO: Bracket(TOKOCRYPTO, bound="lower", needs_venue_listing=True),
+}
+
 # Thirty days of trailing bars, matching the issue's gate. Long enough that one
 # quiet week does not evict an asset, short enough to catch a pair going dark.
 DEFAULT_WINDOW_DAYS = 30
@@ -88,6 +107,11 @@ class ExclusionList:
     `version` and `as_of` are what a result quotes. `sha256` is what proves the
     quote: a list edited without a version bump would otherwise produce two
     different Universes under one name.
+
+    An entry names a venue *pair*, not a base asset, so the list is scoped to the
+    book it was written for — the USDT book, which is the only one the Universe
+    is built from. A second quote book needs its own entries, and `base_asset` is
+    checked against the symbol so the two cannot drift apart.
     """
 
     version: str
@@ -115,6 +139,15 @@ class ExclusionList:
             if symbol in seen:
                 raise PolicyError(f"{symbol} appears twice in the exclusion list")
             seen.add(symbol)
+            base_asset = _require_str(raw, "base_asset", f"{symbol}.base_asset")
+            # An entry names one venue pair and the asset inside it. If the two
+            # disagree the entry excludes something other than what it claims to,
+            # which is the quietest way a hand-maintained list goes wrong.
+            if not symbol.startswith(base_asset):
+                raise PolicyError(
+                    f"{symbol} does not begin with its base asset {base_asset!r}; "
+                    "an entry names one venue pair and the asset it is a claim on"
+                )
             category = _require_str(raw, "category", f"{symbol}.category")
             if category not in CATEGORIES:
                 raise PolicyError(
@@ -124,7 +157,7 @@ class ExclusionList:
             entries.append(
                 ExclusionEntry(
                     symbol=symbol,
-                    base_asset=_require_str(raw, "base_asset", f"{symbol}.base_asset"),
+                    base_asset=base_asset,
                     category=category,
                     design_intent=_require_str(
                         raw, "design_intent", f"{symbol}.design_intent"
@@ -212,13 +245,21 @@ class LiquidityFloor:
     floor_usd: float
     window_days: int = DEFAULT_WINDOW_DAYS
 
+    def __post_init__(self) -> None:
+        if self.window_days < 1:
+            raise PolicyError(f"window_days must be at least 1, got {self.window_days}")
+        if self.floor_usd < 0:
+            raise PolicyError(f"floor_usd must not be negative, got {self.floor_usd}")
+
     def mask(self, dollar_volume: pd.DataFrame) -> pd.DataFrame:
         """True where the trailing median clears the floor on that date.
 
-        The shift is the point-in-time boundary and is the whole reason this is a
-        method rather than a one-liner at the call site: the window ends on the
-        bar *before* the Decision Bar, so a volume spike on the Decision Bar
-        itself cannot admit an asset we would have had no way to see.
+        `closed="left"` is the point-in-time boundary and is the whole reason
+        this is a method rather than a one-liner at the call site: the window is
+        `[t - window_days, t)`, so the Decision Bar's own session is outside it
+        and a volume spike on that bar cannot admit an asset we would have had no
+        way to see. A positional `.shift(1)` would say something subtly different
+        — the previous *row*, which across a hole in the index can be weeks back.
 
         A symbol without a full window of history is False rather than NaN: not
         enough bars to judge is not the same as passing, and a data-quality gate
@@ -229,18 +270,44 @@ class LiquidityFloor:
         than in rows, so a frame with a hole in its index does not quietly widen
         it into a 30-row window spanning more than 30 days.
         """
-        if self.window_days < 1:
-            raise PolicyError(f"window_days must be at least 1, got {self.window_days}")
         if not isinstance(dollar_volume.index, pd.DatetimeIndex):
             raise PolicyError("dollar volume must be indexed on ts_utc timestamps")
         if not dollar_volume.index.is_monotonic_increasing:
             raise PolicyError("dollar volume must be sorted by ts_utc")
-        trailing_median = (
-            dollar_volume.shift(1)
-            .rolling(f"{self.window_days}D", min_periods=self.window_days)
-            .median()
-        )
+        trailing_median = dollar_volume.rolling(
+            f"{self.window_days}D", closed="left", min_periods=self.window_days
+        ).median()
         return (trailing_median >= self.floor_usd).fillna(False)
+
+    def mask_for(
+        self,
+        dollar_volume: pd.DataFrame,
+        *,
+        index: pd.DatetimeIndex,
+        columns: pd.Index,
+    ) -> pd.DataFrame:
+        """`mask`, aligned to the dates and symbols of a Universe panel.
+
+        The median is taken on the volume frame's own index first, so volume
+        history reaching back before the panel starts still feeds the window.
+
+        A symbol the volume frame does not carry is an error, not a silent drop:
+        an asset vanishing from the Universe because its volume column was
+        forgotten looks exactly like an asset that failed the gate.
+        """
+        missing = [symbol for symbol in columns if symbol not in dollar_volume.columns]
+        if missing:
+            raise PolicyError(
+                "the dollar volume frame is missing "
+                f"{', '.join(sorted(missing))}, so the liquidity floor cannot be "
+                "applied to the whole Universe"
+            )
+        return (
+            self.mask(dollar_volume)
+            .reindex(index=index, columns=columns)
+            .fillna(False)
+            .astype(bool)
+        )
 
     def to_metadata(self, *, applied: bool, n_symbol_dates_dropped: int) -> dict[str, Any]:
         return {
@@ -327,14 +394,15 @@ def apply_universe_policy(
     that asked for a floor and quietly did not get one is the kind of result that
     cannot be told apart from a run that never asked.
     """
-    if bracket not in BRACKETS:
+    selected = _BRACKET_BY_NAME.get(bracket)
+    if selected is None:
         raise PolicyError(
             f"bracket must be one of {', '.join(BRACKETS)}, got {bracket!r}"
         )
-    if bracket == TOKOCRYPTO and venue_listing is None:
+    if selected.needs_venue_listing and venue_listing is None:
         raise PolicyError(
-            "the tokocrypto bracket needs a venue listing to stand on; pass one "
-            "loaded from policy/, or select the binance-full bracket"
+            f"the {bracket} bracket needs a venue listing to stand on; pass one "
+            f"loaded from policy/, or select the {BINANCE_FULL} bracket"
         )
     if floor is not None and dollar_volume is None:
         raise PolicyError(
@@ -344,23 +412,24 @@ def apply_universe_policy(
     tradeable = panel.tradeable.copy()
     symbols = list(tradeable.columns)
 
-    excluded_here = [symbol for symbol in symbols if exclusions.excludes(symbol)]
+    excluded_symbols = exclusions.symbols
+    excluded_here = [symbol for symbol in symbols if symbol in excluded_symbols]
     for symbol in excluded_here:
         tradeable[symbol] = False
 
-    bracket_symbols = None if bracket == BINANCE_FULL else set(venue_listing.symbols)
     dropped_by_bracket: list[str] = []
-    if bracket_symbols is not None:
-        dropped_by_bracket = [
-            symbol for symbol in symbols if symbol not in bracket_symbols
-        ]
+    if selected.needs_venue_listing:
+        listed = set(venue_listing.symbols)
+        dropped_by_bracket = [symbol for symbol in symbols if symbol not in listed]
         for symbol in dropped_by_bracket:
             tradeable[symbol] = False
 
     floor_applied = floor is not None and dollar_volume is not None
     n_dropped_by_floor = 0
     if floor_applied:
-        passes_floor = _floor_mask_for(panel, dollar_volume, floor)
+        passes_floor = floor.mask_for(
+            dollar_volume, index=tradeable.index, columns=tradeable.columns
+        )
         n_dropped_by_floor = int((tradeable & ~passes_floor).to_numpy().sum())
         tradeable &= passes_floor
 
@@ -369,7 +438,7 @@ def apply_universe_policy(
         "exclusion_list": _exclusion_metadata(exclusions, panel, symbols, excluded_here),
         "bracket": {
             "selected": bracket,
-            "bound": "upper" if bracket == BINANCE_FULL else "lower",
+            "bound": selected.bound,
             "upper_bound": BINANCE_FULL,
             "lower_bound": TOKOCRYPTO,
             "venue_listing": (
@@ -415,34 +484,6 @@ def universe_bracket(
     }
 
 
-def _floor_mask_for(
-    panel: PointInTimePanel, dollar_volume: pd.DataFrame, floor: LiquidityFloor
-) -> pd.DataFrame:
-    """The floor mask, aligned to the panel's dates and symbols.
-
-    A symbol the volume frame does not carry is an error, not a silent drop: an
-    asset vanishing from the Universe because its volume column was forgotten
-    looks exactly like an asset that failed the gate.
-    """
-    missing = [
-        symbol for symbol in panel.tradeable.columns if symbol not in dollar_volume.columns
-    ]
-    if missing:
-        raise PolicyError(
-            "the dollar volume frame is missing "
-            f"{', '.join(sorted(missing))}, so the liquidity floor cannot be "
-            "applied to the whole Universe"
-        )
-    # Masked on the volume frame's own index first, so volume history reaching
-    # back before the panel starts still feeds the trailing median.
-    mask = floor.mask(dollar_volume)
-    return (
-        mask.reindex(index=panel.tradeable.index, columns=panel.tradeable.columns)
-        .fillna(False)
-        .astype(bool)
-    )
-
-
 def _exclusion_metadata(
     exclusions: ExclusionList,
     panel: PointInTimePanel,
@@ -459,9 +500,10 @@ def _exclusion_metadata(
     """
     per_symbol = panel.metadata.get("symbols", {})
     as_of = _as_utc(exclusions.as_of)
+    excluded_symbols = set(excluded_here)
     unclassified = []
     for symbol in symbols:
-        if exclusions.excludes(symbol):
+        if symbol in excluded_symbols:
             continue
         first_tradeable = per_symbol.get(symbol, {}).get("first_tradeable_ts_utc")
         if first_tradeable is not None and _as_utc(first_tradeable) > as_of:
