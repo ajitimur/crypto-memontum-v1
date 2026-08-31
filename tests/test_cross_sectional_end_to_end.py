@@ -410,3 +410,47 @@ def test_the_liquidity_floor_can_evict_the_whole_cross_section(
     assert record.portfolio["n_rebalances_held_cash"] == record.portfolio["n_rebalances"]
     assert record.metrics["net_return"] == pytest.approx(0.0)
     assert record.window["universe"]["liquidity_floor"]["applied"] is True
+
+
+def test_the_cap_weighted_market_portfolio_is_built_from_the_same_universe(record):
+    """The secondary reference of ADR-0005: everything the Universe offered,
+    weighted by the same vendor caps the strategy sizes positions with."""
+    market = record.benchmarks["cap_weighted_market"]
+
+    assert market["computed"] is True
+    # All six names, against the strategy's quintile of two, on the same cadence.
+    assert market["mean_n_positions"] == pytest.approx(6.0)
+    assert market["n_rebalances"] == record.portfolio["n_rebalances"]
+    assert market["n_marks"] == record.metrics["n_marks"]
+
+
+def test_the_market_portfolio_is_reported_net_of_the_same_cost(record):
+    market = record.benchmarks["cap_weighted_market"]
+
+    assert market["cost_bps_per_side"] == pytest.approx(45.44)
+    assert market["net_return"] < market["gross_return"]
+
+
+def test_the_run_is_read_against_btc_over_its_own_window(record):
+    """The hurdle is held over the strategy's window, not the config's: BTC's
+    Decision Bar is the strategy's, so the two paths cover the same days."""
+    btc = record.benchmarks["btc_buy_and_hold"]
+
+    assert btc["symbol"] == "BTCUSDT"
+    assert btc["decision_ts_utc"] == record.metrics["decision_ts_utc"]
+    assert btc["n_marks"] == record.metrics["n_marks"]
+
+
+def test_the_deployment_hurdle_is_recorded_on_its_three_conditions(record):
+    hurdle = record.benchmarks["deployment_hurdle"]
+
+    assert hurdle["adr"] == "ADR-0005"
+    assert set(hurdle) >= {
+        "sharpe_above_btc",
+        "drawdown_no_worse_than_btc",
+        "clears_profitability_bar",
+        "clears",
+    }
+    # BTC is the fastest-compounding name here, so the quintile that holds it
+    # cannot beat holding it alone once the strategy's turnover is paid for.
+    assert hurdle["clears"] is False

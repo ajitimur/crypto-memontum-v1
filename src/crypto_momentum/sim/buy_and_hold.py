@@ -80,6 +80,36 @@ def simulate_buy_and_hold(bars: pd.DataFrame, *, cost_bps_per_side: float) -> Ru
     )
 
 
+def hold_metadata() -> dict[str, object]:
+    """What the reporting block asks about a hold's positions.
+
+    The counterpart to `CrossSectionalRun.to_metadata`, and here for the same
+    reason: how the positions were formed is the strategy's own fact to state,
+    not something the runner asserts on its behalf.
+
+    Every figure is a constant because a hold has no freedom in any of them. One
+    name, bought once, fully invested on every mark until the series ends — and
+    it ends at the halt or the window, never by going to cash. Under ADR-0004
+    there is no short leg, so net exposure is gross exposure.
+
+    There is deliberately no Rebalance Turnover here. A hold rebalances zero
+    times, so it has no turnover to average, and reporting its entry as 100%
+    would put a number under the 25% weekly ceiling of ADR-0007 that the ceiling
+    was never written about.
+    """
+    return {
+        "strategy": "buy_and_hold",
+        "long_only": True,
+        "levered": False,
+        "trend_gate": False,
+        "n_rebalances": 0,
+        "mean_n_positions": 1.0,
+        "mean_gross_exposure": 1.0,
+        "mean_net_exposure": 1.0,
+        "max_gross_exposure": 1.0,
+    }
+
+
 def _hold_before_halt(held: pd.DataFrame) -> pd.DataFrame:
     """The held bars up to, but not including, the bar the asset halted on."""
     halt_ts = halted_at(held)

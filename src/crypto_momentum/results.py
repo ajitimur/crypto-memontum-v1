@@ -33,6 +33,16 @@ class RunRecord:
     # levy, plus the slippage assumption. A net figure without this beside it is
     # not a result, per the Net invariant.
     costs: dict[str, Any] = field(default_factory=dict)
+    # What the run is read against: BTC buy-and-hold, the cap-weighted market
+    # portfolio, and ADR-0005's three-condition hurdle over the same window.
+    benchmarks: dict[str, Any] = field(default_factory=dict)
+    # How many configurations had been tried, this one included, when it ran —
+    # counted by config fingerprint, so a re-run of the same bytes is not a
+    # second configuration. The protocol requires it beside every quoted number,
+    # so it travels with the number rather than living only in a log someone has
+    # to go and count. `trials_recorded` is the run count beside it.
+    configurations_tried: int = 0
+    trials_recorded: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -45,6 +55,9 @@ class RunRecord:
             "window": self.window,
             "costs": self.costs,
             "portfolio": self.portfolio,
+            "benchmarks": self.benchmarks,
+            "configurations_tried": self.configurations_tried,
+            "trials_recorded": self.trials_recorded,
             "metrics": self.metrics,
         }
 
@@ -75,6 +88,15 @@ class RunRecord:
                 run_at_utc=self.run_at_utc,
                 config_path=self.config_path,
                 config_sha256=self.config_sha256,
+            ),
+            "configurations_tried": self.configurations_tried,
+            "trials_recorded": self.trials_recorded,
+            # Whether the run cleared ADR-0005's hurdle, so the log answers "did
+            # any of these beat holding Bitcoin" without opening every result.
+            **(
+                {"clears_deployment_hurdle": self.benchmarks["deployment_hurdle"]["clears"]}
+                if "deployment_hurdle" in self.benchmarks
+                else {}
             ),
             # The headline shape of the portfolio, so the log answers "how much
             # did this one trade" without opening the result file. The full
@@ -136,6 +158,8 @@ def refused_trial_line(
     run_at_utc: str,
     config_path: str,
     config_sha256: str,
+    configurations_tried: int,
+    trials_recorded: int,
     realised_weekly_turnover: float,
     budget: float,
     reason: str,
@@ -156,6 +180,11 @@ def refused_trial_line(
             config_path=config_path,
             config_sha256=config_sha256,
         ),
+        # A refused configuration is still one of the configurations tried, so it
+        # carries the same counts a recorded run does — otherwise the search
+        # behind a later result would silently omit the ones the ceiling stopped.
+        "configurations_tried": configurations_tried,
+        "trials_recorded": trials_recorded,
         "refused": "turnover_budget_breached",
         "weekly_rebalance_turnover": realised_weekly_turnover,
         "turnover_budget_weekly": budget,

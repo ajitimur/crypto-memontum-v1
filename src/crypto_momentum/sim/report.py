@@ -23,6 +23,15 @@ MARKS_PER_YEAR = 365
 # not risk. Dividing by it would report a Sharpe in the trillions.
 FLAT_PATH_VOL = 1e-12
 
+# ADR-0002: profitability is decided on the mean log return's Newey-West
+# t-statistic, at a bar of 3.0 rather than the conventional 2.0, because this
+# research area is mined heavily enough that 2.0 selects noise.
+PROFITABILITY_T_BAR = 3.0
+
+# A long-run variance at or below this is a series with no dispersion left to
+# divide by, not a certainty about its mean.
+FLAT_PATH_VARIANCE = 1e-24
+
 # How a holding period ended.
 WINDOW_END = "window_end"
 HALTED = "halted"
@@ -67,11 +76,41 @@ class RunResult:
     ann_vol_net: float
     sharpe_net: float | None
     mean_log_return_daily_net: float | None
+    mean_return_daily_net: float
+    mean_log_return_t_stat: float | None
+    newey_west_lags: int | None
     max_drawdown: float
     max_drawdown_peak_ts_utc: pd.Timestamp | None
     max_drawdown_trough_ts_utc: pd.Timestamp | None
     cost_drag_annualised: float | None
     cost_drag_as_fraction_of_gross: float | None
+
+    @property
+    def clears_profitability_bar(self) -> bool:
+        """Whether ADR-0002's bar is cleared: mean log return at t > 3.0.
+
+        False rather than `None` when there is no t-statistic to read, because a
+        run with nothing to show has not cleared the bar; a `None` here would
+        read as "not judged" and get quoted as a finding anyway.
+        """
+        if self.mean_log_return_t_stat is None:
+            return False
+        return self.mean_log_return_t_stat > PROFITABILITY_T_BAR
+
+    @property
+    def mean_return_sign_divergence(self) -> bool:
+        """Whether the two means disagree in sign.
+
+        ADR-0002 asks for this explicitly rather than as something a reader
+        works out from two numbers: a positive mean return on a negative mean
+        log return is the fat-tailed path that loses money while testing
+        significant, and it is the diagnostic that says so.
+        """
+        if self.mean_log_return_daily_net is None:
+            return False
+        return (self.mean_return_daily_net > 0.0) != (
+            self.mean_log_return_daily_net > 0.0
+        )
 
     @property
     def liquidated(self) -> bool:
@@ -115,6 +154,8 @@ def summarise(
         float(daily_net.std(ddof=1) * math.sqrt(MARKS_PER_YEAR)) if n_marks > 1 else 0.0
     )
     ann_return_net = _annualise(net_return, years)
+    mean_log_return = _mean_log_return(daily_net)
+    t_statistic, lags = _log_return_t_statistic(daily_net)
     ann_return_gross = _annualise(gross_return, years)
     peak_ts, trough_ts, max_drawdown = _max_drawdown(equity_net)
     cost_drag_annualised = (
@@ -138,7 +179,10 @@ def summarise(
         ann_return_net=ann_return_net,
         ann_vol_net=ann_vol_net,
         sharpe_net=_sharpe(daily_net, ann_vol_net),
-        mean_log_return_daily_net=_mean_log_return(daily_net),
+        mean_log_return_daily_net=mean_log_return,
+        mean_return_daily_net=float(daily_net.mean()),
+        mean_log_return_t_stat=t_statistic,
+        newey_west_lags=lags,
         max_drawdown=max_drawdown,
         max_drawdown_peak_ts_utc=peak_ts,
         max_drawdown_trough_ts_utc=trough_ts,
@@ -180,6 +224,75 @@ def _mean_log_return(daily_net: pd.Series) -> float | None:
     if (daily_net <= -1.0).any():
         return None
     return float(np.log1p(daily_net).mean())
+
+
+def _log_return_t_statistic(daily_net: pd.Series) -> tuple[float | None, int | None]:
+    """The mean log return's t-statistic, and the lag count it was computed at.
+
+    `(None, None)` on a liquidated path, for the same reason the mean log return
+    itself is `None` there: there is no finite series to take a mean of.
+    """
+    if (daily_net <= -1.0).any():
+        return None, None
+    return newey_west_t_statistic(np.log1p(daily_net))
+
+
+def newey_west_lag_count(n_observations: int) -> int:
+    """The usual automatic bandwidth, floor(4 * (T/100) ** (2/9)).
+
+    Chosen rather than fitted so that two runs over the same window are compared
+    at the same bandwidth; a lag count tuned per run is one more knob to mine.
+    """
+    if n_observations < 1:
+        return 0
+    return int(math.floor(4.0 * (n_observations / 100.0) ** (2.0 / 9.0)))
+
+
+def newey_west_t_statistic(
+    series: pd.Series, *, lags: int | None = None
+) -> tuple[float | None, int | None]:
+    """The t-statistic of `series`' mean under a Newey-West standard error.
+
+    Daily marks of a weekly-rebalanced portfolio are autocorrelated — the same
+    positions are held across the days of a holding period — and a plain
+    standard error understates the sampling error of their mean by ignoring it.
+    The Newey-West long-run variance widens the error by the autocovariances out
+    to `lags`, Bartlett-weighted so the estimate stays non-negative.
+
+    `lags` exists so a test can pin the estimator at a bandwidth whose answer
+    was worked out by hand. No run passes it: a bandwidth chosen per run is a
+    knob to mine, and the automatic rule above is what every result uses.
+
+    The autocovariances and the variance of the mean both divide by T, the
+    textbook estimator, with no small-sample correction. On a window of a few
+    dozen marks that biases the standard error down and so the t-statistic up —
+    towards clearing a bar ADR-0002 set deliberately high. Read a t near 3.0 on
+    a short window as not yet decided rather than as cleared; the correction is
+    not applied silently here because a t-statistic computed two ways is not
+    comparable across runs.
+
+    `None` when the series is too short to have a standard error, or has no
+    dispersion left to divide by: an undefined t, not an infinite one.
+    """
+    values = series.to_numpy(dtype=float)
+    n_observations = len(values)
+    if n_observations < 2:
+        return None, None
+    if lags is None:
+        lags = newey_west_lag_count(n_observations)
+    lags = min(lags, n_observations - 1)
+
+    deviations = values - values.mean()
+    long_run_variance = float(deviations @ deviations) / n_observations
+    for lag in range(1, lags + 1):
+        autocovariance = float(deviations[lag:] @ deviations[:-lag]) / n_observations
+        bartlett_weight = 1.0 - lag / (lags + 1.0)
+        long_run_variance += 2.0 * bartlett_weight * autocovariance
+    if not long_run_variance > FLAT_PATH_VARIANCE:
+        return None, lags
+
+    standard_error = math.sqrt(long_run_variance / n_observations)
+    return float(values.mean() / standard_error), lags
 
 
 def _annualise(total_return: float, years: float) -> float:
