@@ -22,3 +22,20 @@ def recorded_archive_file():
         return filename, payload, checksum_text
 
     return read
+
+
+LISTINGS = FIXTURES / "binance" / "listing"
+
+
+@pytest.fixture
+def recorded_listing_page():
+    """Read a recorded `ListBucketResult` page from the archive bucket.
+
+    Like the kline fixtures, these bytes were listed once and committed. Nothing
+    in the suite lists the live bucket.
+    """
+
+    def read(name: str) -> bytes:
+        return (LISTINGS / name).read_bytes()
+
+    return read

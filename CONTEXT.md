@@ -24,6 +24,14 @@ _Avoid_: test set, out-of-sample period, validation set
 The set of assets tradeable as of a given rebalance date, reconstructed as it stood on that date and including assets that later delisted, depegged, or unwound.
 _Avoid_: basket, watchlist, coin list, investable set
 
+**Archive Coverage**:
+The set of monthly partitions `data.binance.vision` publishes for one symbol, counted only where the zip and its published SHA256 are both present. This is what the Universe is reconstructed from, in place of an exchange listing that only knows what still trades.
+_Avoid_: listing history, availability, symbol history
+
+**Archive Floor**:
+2017-08-17, the first date the archive publishes anything. A date below it is outside the archive rather than a date on which nothing traded, and a panel says which of the two it means.
+_Avoid_: data start, earliest date, history start
+
 **Grid**:
 The set of (lookback, holding period) pairs a strategy is evaluated across — 21 of them in the paper we replicate. A result is judged on the shape of the grid, not on a single cell.
 _Avoid_: parameter sweep, sensitivity analysis
