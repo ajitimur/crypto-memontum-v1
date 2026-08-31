@@ -200,6 +200,8 @@ def _run_cross_sectional(
         lookback_days=config.lookback_days,
         holding_days=config.holding_days,
         quantile=config.quantile,
+        min_universe=config.min_universe,
+        max_cap_staleness_days=config.max_cap_staleness_days,
         cost_bps_per_side=config.cost_bps_per_side,
     )
 

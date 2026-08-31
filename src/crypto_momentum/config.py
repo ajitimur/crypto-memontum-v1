@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from crypto_momentum.sim.cross_sectional import (
+    DEFAULT_CAP_STALENESS_DAYS,
+    MIN_UNIVERSE,
+)
 from crypto_momentum.sim.universe_policy import (
     BINANCE_FULL,
     BRACKETS,
@@ -39,7 +43,13 @@ SUPPORTED_STRATEGIES = (BUY_AND_HOLD, CROSS_SECTIONAL)
 # buy-and-hold config reads, in the trials log, exactly like one that was used.
 _STRATEGY_KEYS: dict[str, tuple[str, ...]] = {
     BUY_AND_HOLD: (),
-    CROSS_SECTIONAL: ("lookback_days", "holding_days", "quantile"),
+    CROSS_SECTIONAL: (
+        "lookback_days",
+        "holding_days",
+        "quantile",
+        "min_universe",
+        "max_cap_staleness_days",
+    ),
 }
 
 _SCHEMA: dict[str, tuple[str, ...]] = {
@@ -79,6 +89,8 @@ class RunConfig:
     lookback_days: int | None = None
     holding_days: int | None = None
     quantile: float | None = None
+    min_universe: int = MIN_UNIVERSE
+    max_cap_staleness_days: int = DEFAULT_CAP_STALENESS_DAYS
     bracket: str = BINANCE_FULL
     liquidity_floor_usd: float | None = None
     liquidity_window_days: int = DEFAULT_WINDOW_DAYS
@@ -266,6 +278,18 @@ def _strategy_parameters(strategy: dict[str, Any], strategy_kind: str) -> dict[s
         "lookback_days": lookback_days,
         "holding_days": holding_days,
         "quantile": quantile,
+        # Both change what a run holds, so both are config rather than a literal
+        # in the simulator: a date that held cash has to be accountable to a
+        # number someone wrote down.
+        "min_universe": _optional_positive_int(
+            strategy, "min_universe", "strategy.min_universe", MIN_UNIVERSE
+        ),
+        "max_cap_staleness_days": _optional_positive_int(
+            strategy,
+            "max_cap_staleness_days",
+            "strategy.max_cap_staleness_days",
+            DEFAULT_CAP_STALENESS_DAYS,
+        ),
     }
 
 

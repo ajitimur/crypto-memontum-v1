@@ -43,8 +43,8 @@ def market_cap_panel(
     panel: pd.DataFrame,
     symbols: Iterable[str],
     *,
+    repo_root: Path | str,
     quote_asset: str = "USDT",
-    repo_root: Path | str = ".",
     symbol_map: SymbolMap | None = None,
 ) -> pd.DataFrame:
     """The panel's capitalisations as one column per venue symbol.
@@ -69,7 +69,7 @@ def market_cap_panel(
     snapshots = pd.DatetimeIndex(sorted(set(panel.index)), name="ts_utc")
     base_to_symbol = {base: symbol for symbol, base in bases.items()}
 
-    rows = panel.reset_index()[["ts_utc", "cmc_id", "market_cap_usd"]]
+    rows = panel.reset_index()[["ts_utc", "cmc_id", "market_cap_usd"]].copy()
     rows["symbol"] = pd.Series(pd.NA, index=rows.index, dtype=object)
     # One pass per link rather than per panel row: the panel is every asset on
     # every weekly snapshot since 2013, and a row-by-row join over it is minutes

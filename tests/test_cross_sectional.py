@@ -444,3 +444,79 @@ class TestCrossSectionalRun:
                 holding_days=7,
                 cost_bps_per_side=0.0,
             )
+
+
+class TestTheFillBoundary:
+    def test_an_asset_that_halts_during_the_fill_session_is_still_bought(self):
+        """Whether today trades is not knowable at today's open.
+
+        Gating the fill on the fill bar's own volume would be a decision made
+        with the session's outcome in hand. The honest path is to buy at the
+        open, discover the halt when the session closes, and exit at the price
+        actually paid — which is the last one anyone transacted at.
+        """
+        closes, bars, tradeable, caps = ten_name_market()
+        fill_ts = pd.Timestamp("2021-01-17T00:00:00Z")
+        halted = {symbol: bars[symbol].copy() for symbol in bars}
+        halted["A0USDT"].loc[fill_ts, "volume"] = 0.0
+
+        run = simulate_cross_sectional(
+            halted,
+            tradeable=tradeable,
+            market_caps=caps,
+            lookback_days=14,
+            holding_days=7,
+            cost_bps_per_side=0.0,
+        )
+
+        first = run.selections[0]
+        assert first.entry_ts_utc == fill_ts
+        assert "A0USDT" in first.symbols, "the open was there, so the order fills"
+        assert first.unfilled == ()
+
+        exited = [event for event in run.halt_exits if event.symbol == "A0USDT"]
+        assert exited[0].exit_ts_utc == fill_ts
+        assert exited[0].exit_price == pytest.approx(
+            float(bars["A0USDT"]["open"].loc[fill_ts])
+        )
+
+    def test_an_asset_with_no_opening_price_is_not_bought(self):
+        closes, bars, tradeable, caps = ten_name_market()
+        fill_ts = pd.Timestamp("2021-01-17T00:00:00Z")
+        gapped = {symbol: bars[symbol].copy() for symbol in bars}
+        gapped["A0USDT"].loc[fill_ts, "open"] = np.nan
+
+        run = simulate_cross_sectional(
+            gapped,
+            tradeable=tradeable,
+            market_caps=caps,
+            lookback_days=14,
+            holding_days=7,
+            cost_bps_per_side=0.0,
+        )
+
+        first = run.selections[0]
+        assert "A0USDT" not in first.symbols
+        assert first.unfilled == ("A0USDT",)
+        # Its weight stays in cash rather than being spread over the rest.
+        assert sum(first.weights.values()) < 1.0
+
+
+class TestExposure:
+    def test_the_closing_day_is_not_averaged_in_as_a_flat_one(self):
+        """The book is closed on the last bar, but it was held through it."""
+        closes, bars, tradeable, caps = ten_name_market()
+
+        run = simulate_cross_sectional(
+            bars,
+            tradeable=tradeable,
+            market_caps=caps,
+            lookback_days=14,
+            holding_days=7,
+            cost_bps_per_side=0.0,
+        )
+
+        assert run.exposure_gross.iloc[-1] == pytest.approx(1.0)
+        assert run.max_gross_exposure == pytest.approx(1.0)
+        # Fully invested every day of the run, so the average is one too.
+        assert run.mean_gross_exposure == pytest.approx(1.0)

@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
@@ -126,10 +126,12 @@ class CrossSectionalRun:
     result: RunResult
     selections: tuple[Selection, ...]
     halt_exits: tuple[HaltExit, ...]
-    exposure_net: pd.Series
+    exposure_gross: pd.Series
     lookback_days: int
     holding_days: int
     quantile: float
+    min_universe: int
+    max_cap_staleness_days: int
 
     @property
     def n_rebalances(self) -> int:
@@ -153,11 +155,11 @@ class CrossSectionalRun:
 
     @property
     def mean_gross_exposure(self) -> float:
-        return float(self.exposure_net.mean()) if len(self.exposure_net) else 0.0
+        return float(self.exposure_gross.mean()) if len(self.exposure_gross) else 0.0
 
     @property
     def max_gross_exposure(self) -> float:
-        return float(self.exposure_net.max()) if len(self.exposure_net) else 0.0
+        return float(self.exposure_gross.max()) if len(self.exposure_gross) else 0.0
 
     def to_metadata(self) -> dict[str, Any]:
         """What the result file records about how the positions were formed.
@@ -172,6 +174,10 @@ class CrossSectionalRun:
             "lookback_days": self.lookback_days,
             "holding_days": self.holding_days,
             "quantile": self.quantile,
+            # Why a date can hold cash, recorded alongside how often one did —
+            # otherwise a run of cash weeks is a result nobody can account for.
+            "min_universe": self.min_universe,
+            "max_cap_staleness_days": self.max_cap_staleness_days,
             "long_only": True,
             "levered": False,
             "trend_gate": False,
@@ -183,6 +189,13 @@ class CrossSectionalRun:
             "mean_gross_exposure": self.mean_gross_exposure,
             "mean_net_exposure": self.mean_gross_exposure,
             "max_gross_exposure": self.max_gross_exposure,
+            # `entry_price` and `exit_price` on the result are equity levels for a
+            # portfolio, not prices: 1.0 at the Decision Bar, and where the same
+            # walk without costs ended up.
+            "equity_basis": (
+                "entry_price and exit_price are portfolio equity levels, not "
+                "asset prices"
+            ),
             "n_halt_exits": len(self.halt_exits),
             "halt_exits": [
                 {
@@ -355,8 +368,8 @@ def simulate_cross_sectional(
         min_universe=min_universe,
         max_cap_staleness_days=max_cap_staleness_days,
     )
-    charged = _walk(prices, plan, holding_days=holding_days, cost=cost_bps_per_side * BPS)
-    gross = _walk(prices, plan, holding_days=holding_days, cost=0.0)
+    charged = _walk(prices, plan, cost_per_side=cost_bps_per_side * BPS)
+    gross = _walk(prices, plan, cost_per_side=0.0)
 
     path = _marked(charged.equity)
     result = summarise(
@@ -373,10 +386,12 @@ def simulate_cross_sectional(
         result=result,
         selections=tuple(charged.selections),
         halt_exits=tuple(charged.halt_exits),
-        exposure_net=charged.exposure,
+        exposure_gross=charged.exposure,
         lookback_days=lookback_days,
         holding_days=holding_days,
         quantile=quantile,
+        min_universe=min_universe,
+        max_cap_staleness_days=max_cap_staleness_days,
     )
 
 
@@ -429,6 +444,21 @@ class _AlignedPrices:
 
 
 @dataclass(frozen=True)
+class _PlannedRebalance:
+    """What one Decision Bar decided, before any of it is filled or paid for.
+
+    Separate from `Selection`, which is what the rebalance turned out to be: this
+    is formed from the signal alone, and the same plan is walked twice — once
+    with costs and once without — so the two walks cannot select differently.
+    """
+
+    decision_ts: pd.Timestamp
+    selected: tuple[str, ...]
+    weights: pd.Series
+    n_eligible: int
+
+
+@dataclass(frozen=True)
 class _Walk:
     """One pass of the path: the equity it produced and what happened along it."""
 
@@ -474,7 +504,7 @@ def _plan_rebalances(
     quantile: float,
     min_universe: int,
     max_cap_staleness_days: int,
-) -> list[tuple[pd.Timestamp, tuple[str, ...], pd.Series, int]]:
+) -> list[_PlannedRebalance]:
     """Form every rebalance's target weights, once, before any of them is filled.
 
     Selection depends on nothing downstream of it — not on what is currently
@@ -505,35 +535,40 @@ def _plan_rebalances(
         )
         n_eligible = int(eligible.sum())
         if n_eligible < min_universe:
-            plan.append((decision_ts, (), pd.Series(dtype=float), n_eligible))
+            plan.append(
+                _PlannedRebalance(decision_ts, (), pd.Series(dtype=float), n_eligible)
+            )
             continue
         selected = select_top_quantile(signal.where(eligible), quantile=quantile)
         plan.append(
-            (decision_ts, selected, value_weights(caps[list(selected)]), n_eligible)
+            _PlannedRebalance(
+                decision_ts, selected, value_weights(caps[list(selected)]), n_eligible
+            )
         )
     return plan
 
 
 def _walk(
     prices: _AlignedPrices,
-    plan: list[tuple[pd.Timestamp, tuple[str, ...], pd.Series, int]],
+    plan: list[_PlannedRebalance],
     *,
-    holding_days: int,
-    cost: float,
+    cost_per_side: float,
 ) -> _Walk:
     """Walk the plan day by day, holding units of each asset and marking nightly.
+
+    `cost_per_side` is a fraction, not basis points, and is charged on each side
+    of every trade. Zero walks the same plan for free, which is the gross path.
 
     Units rather than weights, because a value-weighted portfolio drifts between
     rebalances and the drift is the position: re-imposing the target weights on
     every mark would be a daily rebalance nobody asked for and nobody paid for.
     """
     index = prices.index
-    first_fill = plan[0][0] + pd.Timedelta(days=1)
+    first_fill = plan[0].decision_ts + pd.Timedelta(days=1)
     marks = index[index >= first_fill]
 
     fills = {
-        decision_ts + pd.Timedelta(days=1): (decision_ts, selected, weights, n_eligible)
-        for decision_ts, selected, weights, n_eligible in plan
+        planned.decision_ts + pd.Timedelta(days=1): planned for planned in plan
     }
 
     units: dict[str, float] = {}
@@ -544,52 +579,74 @@ def _walk(
     halt_exits: list[HaltExit] = []
 
     for position, today in enumerate(marks):
-        tradeable_today = prices.tradeable_bar.loc[today]
+        opens_today = prices.opens.loc[today]
+        closes_today = prices.closes.loc[today]
+        # Two different questions, and conflating them is how the fill decision
+        # ends up reading the fill session's own volume. `has_open` is what is
+        # knowable at the open, when orders go in. `traded_all_day` is only
+        # knowable once the session is over, and is what says the asset halted.
+        has_open = opens_today.notna() & (opens_today > 0.0)
+        traded_all_day = prices.tradeable_bar.loc[today]
 
-        # A position in an asset that has stopped trading is closed before
-        # anything else happens today, at the last price it could have been sold
-        # at. Holding it to the end of the segment would mark it at prices no
-        # order could have reached.
-        for symbol in [held for held in units if not tradeable_today[held]]:
+        def exit_position(symbol: str, cash: float) -> float:
             exit_price = last_tradeable_close[symbol]
             proceeds = units.pop(symbol) * exit_price
-            cash += proceeds - cost * proceeds
             halt_exits.append(HaltExit(symbol, today, exit_price))
+            return cash + proceeds - cost_per_side * proceeds
 
-        fill = fills.get(today)
-        if fill is not None:
-            selection = _rebalance(
+        # Morning. A holding with no opening price is one no order can reach
+        # today, so it leaves the book at the last price it could have been sold
+        # at — before the rebalance, which would otherwise value it at a NaN.
+        for symbol in [held for held in units if not has_open[held]]:
+            cash = exit_position(symbol, cash)
+
+        planned = fills.get(today)
+        if planned is not None:
+            rebalanced = _rebalance(
                 prices,
-                fill,
+                planned,
                 today=today,
                 units=units,
                 cash=cash,
-                cost=cost,
-                tradeable_today=tradeable_today,
+                cost_per_side=cost_per_side,
+                has_open=has_open,
             )
-            units, cash = selection.units, selection.cash
-            selections.append(selection.recorded)
+            units, cash = rebalanced.units, rebalanced.cash
+            selections.append(rebalanced.recorded)
+            # Whatever is on the book was traded at today's open, so that is now
+            # the last price we know an order of ours filled at.
+            for symbol in units:
+                last_tradeable_close[symbol] = float(opens_today[symbol])
 
-        closes_today = prices.closes.loc[today]
+        # Evening. The session is over, so now we know which assets it produced
+        # no tradeable bar for. One bought at this morning's open and gone dark
+        # by the close exits at what we paid for it, which is the only price
+        # anyone actually transacted at.
+        for symbol in [held for held in units if not traded_all_day[held]]:
+            cash = exit_position(symbol, cash)
+
         for symbol in units:
             last_tradeable_close[symbol] = float(closes_today[symbol])
         invested = sum(held * closes_today[symbol] for symbol, held in units.items())
+
+        # Exposure is recorded before the book is closed: the position was held
+        # through this session, and averaging in the flat day the window happens
+        # to end on would understate every run by one day.
+        value = cash + invested
+        equity[today] = value
+        exposure[today] = invested / value if value > 0.0 else 0.0
 
         if position == len(marks) - 1:
             # The window ends, so the book is closed at the last close and the
             # sell-side cost lands on the final mark — the same convention the
             # single-asset hold uses.
-            cash += invested - cost * invested
-            invested = 0.0
+            cash += invested - cost_per_side * invested
             units = {}
-
-        value = cash + invested
-        equity[today] = value
-        exposure[today] = invested / value if value > 0.0 else 0.0
+            equity[today] = cash
 
     return _Walk(
         equity=pd.Series(equity, name="equity_net").rename_axis("ts_utc"),
-        exposure=pd.Series(exposure, name="gross_exposure").rename_axis("ts_utc"),
+        exposure=pd.Series(exposure, name="exposure_gross").rename_axis("ts_utc"),
         selections=selections,
         halt_exits=halt_exits,
     )
@@ -606,22 +663,28 @@ class _Rebalanced:
 
 def _rebalance(
     prices: _AlignedPrices,
-    fill: tuple[pd.Timestamp, tuple[str, ...], pd.Series, int],
+    planned: _PlannedRebalance,
     *,
     today: pd.Timestamp,
     units: dict[str, float],
     cash: float,
-    cost: float,
-    tradeable_today: pd.Series,
+    cost_per_side: float,
+    has_open: pd.Series,
 ) -> _Rebalanced:
     """Trade the book to the target weights at today's open, and pay for it.
 
-    A selected asset with no tradeable open today is not bought — its weight
-    stays in cash and it is recorded as unfilled. Waiting for it to reopen, or
+    `has_open` is the only thing this may read about today, and it is what an
+    order sees at the open: a price to fill against. Whether the session goes on
+    to trade at all is not knowable yet, so it cannot gate a fill — a selected
+    asset that halts later today is bought here and exits this evening at what
+    was paid for it.
+
+    A selected asset with no opening price is not bought: its weight stays in
+    cash and it is recorded as unfilled. Waiting for it to reopen, or
     renormalising the rest to cover for it, would both spend information the
     Decision Bar did not have.
     """
-    decision_ts, selected, weights, n_eligible = fill
+    decision_ts, selected = planned.decision_ts, planned.selected
     opens_today = prices.opens.loc[today]
 
     value = cash + sum(held * opens_today[symbol] for symbol, held in units.items())
@@ -635,35 +698,30 @@ def _rebalance(
                 entry_ts_utc=today,
                 symbols=(),
                 weights={},
-                n_eligible=n_eligible,
+                n_eligible=planned.n_eligible,
                 unfilled=selected,
                 turnover=0.0,
             ),
         )
 
-    fillable = [
-        symbol
-        for symbol in selected
-        if tradeable_today[symbol] and float(opens_today[symbol]) > 0.0
-    ]
+    fillable = [symbol for symbol in selected if has_open[symbol]]
     unfilled = tuple(symbol for symbol in selected if symbol not in fillable)
 
     held_weights = {
         symbol: held * opens_today[symbol] / value for symbol, held in units.items()
     }
-    target_weights = {symbol: float(weights[symbol]) for symbol in fillable}
+    target_weights = {symbol: float(planned.weights[symbol]) for symbol in fillable}
 
-    traded = sum(
-        abs(target_weights.get(symbol, 0.0) - held_weights.get(symbol, 0.0))
+    changes = [
+        target_weights.get(symbol, 0.0) - held_weights.get(symbol, 0.0)
         for symbol in set(target_weights) | set(held_weights)
-    )
-    bought = sum(
-        max(target_weights.get(symbol, 0.0) - held_weights.get(symbol, 0.0), 0.0)
-        for symbol in set(target_weights) | set(held_weights)
-    )
+    ]
     # Both legs pay, per ADR-0007: `traded` counts the sells and the buys
-    # separately, and each is charged the per-side cost.
-    net_value = value - cost * traded * value
+    # separately, and each is charged the per-side cost. `bought` is the buy side
+    # alone, which is one-way Rebalance Turnover as ADR-0007 measures it.
+    traded = sum(abs(change) for change in changes)
+    bought = sum(change for change in changes if change > 0.0)
+    net_value = value - cost_per_side * traded * value
 
     new_units = {
         symbol: target_weights[symbol] * net_value / float(opens_today[symbol])
@@ -679,7 +737,7 @@ def _rebalance(
             entry_ts_utc=today,
             symbols=tuple(fillable),
             weights=target_weights,
-            n_eligible=n_eligible,
+            n_eligible=planned.n_eligible,
             unfilled=unfilled,
             turnover=bought,
         ),
@@ -694,10 +752,15 @@ def _marked(equity: pd.Series) -> MarkedPath:
     is the one thing the walk must not decide for itself: whether the path
     breached a 100% cumulative loss, and where it therefore ends.
     """
+    breached = equity <= 0.0
+    if breached.any():
+        # Cut at the breach before dividing, rather than filling a NaN afterwards:
+        # a portfolio worth nothing is not a base to measure the next day against,
+        # and a fill would turn an arithmetic accident into a silent liquidation.
+        equity = equity.loc[: breached.idxmax()]
     previous = equity.shift(1)
     previous.iloc[0] = 1.0
-    mark_returns = equity / previous.where(previous > 0.0) - 1.0
-    return mark_daily(mark_returns.fillna(-1.0))
+    return mark_daily(equity / previous - 1.0)
 
 
 def _aligned_gate(
@@ -723,7 +786,7 @@ def _framed(columns: dict[str, pd.Series], index: pd.DatetimeIndex) -> pd.DataFr
     return frame
 
 
-def _mean(values) -> float:
+def _mean(values: Iterable[float]) -> float:
     collected = list(values)
     if not collected:
         return 0.0
