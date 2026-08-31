@@ -91,8 +91,12 @@ Reproducing the shape of Han, Kang and Ryu's published grid on their own sample 
 _Avoid_: validation, sanity check, baseline
 
 **Rebalance Turnover**:
-The fraction of the portfolio traded at a rebalance. The quantity that pays for a strategy's edge, and reported alongside every result.
+The fraction of the portfolio traded at a rebalance. The quantity that pays for a strategy's edge, and reported alongside every result. Measured one-way — half of everything that changed hands, buys and sells together, so that going to cash and coming back from it each count for what they cost rather than one counting double and the other not at all. The opening fill is excluded: it buys the first book from cash by construction, whatever the signal did, and happens once however long the run is. Put on a weekly footing before it is compared to the ceiling, so holding periods of different lengths rank against each other honestly.
 _Avoid_: turnover, churn, trading volume
+
+**Cost Model**:
+A named venue cost structure — `paper` or `tokocrypto` — broken into fee, tax and levy per side. A config names one rather than writing its own basis points, because what a result is net *of* is a venue and a tax regime somebody decided on. Slippage is not part of it: that is our own assumption about our own order.
+_Avoid_: fee schedule, cost assumption, transaction cost
 
 **Net**:
 After fees, funding, slippage and tax, with the assumption stated alongside the number. A figure quoted without its cost assumption is not a result.

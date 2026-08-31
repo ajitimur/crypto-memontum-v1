@@ -7,6 +7,18 @@ import pandas as pd
 import pytest
 
 from crypto_momentum.config import ConfigError, RunConfig
+from crypto_momentum.costs import CostModel
+
+# This test is about which window the hurdle is held over, not about what the
+# window cost, so it prices at zero to keep the two questions apart.
+FREE = CostModel(
+    name="free",
+    fee_bps_per_side=0.0,
+    tax_bps_per_side=0.0,
+    levy_bps_per_side=0.0,
+    tax_charged_on_buys=False,
+    source="a costless model, so a window test measures only the window",
+)
 from crypto_momentum.data.binance_archive import ChecksumMismatch
 from crypto_momentum.runner import Workspace, _btc_over_the_same_window, run_config
 from crypto_momentum.sim.marking import mark_daily
@@ -29,7 +41,7 @@ end_month = "2021-02"
 kind = "buy_and_hold"
 
 [costs]
-fee_bps_per_side = 40.44
+model = "tokocrypto"
 slippage_bps_per_side = 5.0
 """
 
@@ -225,7 +237,9 @@ def test_the_config_is_fingerprinted_so_an_edited_config_is_a_different_trial(
     workspace, config_path, archive
 ):
     first = run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
-    config_path.write_text(CONFIG_TEXT.replace("40.44", "10.0"))
+    # Same window, same asset, priced in the literature's cost world instead of
+    # Tokocrypto's: 15bp a side against 40.44, so the net path has to be better.
+    config_path.write_text(CONFIG_TEXT.replace('"tokocrypto"', '"paper"'))
     second = run_config(
         config_path, workspace, run_at_utc="2026-09-01T09:00:00Z", open_url=archive
     )
@@ -327,7 +341,9 @@ def test_an_edited_config_is_another_configuration_tried(
     """The count is of configurations, so editing one and running it again
     raises it — that is the search the protocol asks to be declared."""
     run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
-    config_path.write_text(CONFIG_TEXT.replace("40.44", "10.0"))
+    # Same window, same asset, priced in the literature's cost world instead of
+    # Tokocrypto's — a different configuration, so a second one tried.
+    config_path.write_text(CONFIG_TEXT.replace('"tokocrypto"', '"paper"'))
 
     second = run_config(
         config_path, workspace, run_at_utc="2026-09-01T09:00:00Z", open_url=archive
@@ -394,7 +410,7 @@ def test_the_hurdle_is_held_over_the_run_s_window_and_not_a_day_longer():
             start_month="2021-01",
             end_month="2021-01",
             strategy_kind="buy_and_hold",
-            fee_bps_per_side=0.0,
+            cost_model=FREE,
             slippage_bps_per_side=0.0,
         ),
         # The bars are already loaded, so nothing is read from the workspace.

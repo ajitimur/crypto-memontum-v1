@@ -62,5 +62,14 @@ liquidity_floor_usd = 250000.0
 # ADR-0007: Tokocrypto charges 0.15% fee + 0.21% PPh + 0.0444% levy per side, on
 # buys as well as sells. At a weekly rebalance this is the binding constraint,
 # not the signal.
-fee_bps_per_side = 40.44
+model = "tokocrypto"
 slippage_bps_per_side = 5.0
+# The turnover budget, at ADR-0007's ceiling.
+#
+# This cell is the paper's own weekly configuration, and the literature reports
+# roughly 68% weekly turnover for these signals — so it may well breach and be
+# refused rather than produce a result. That has not been measured on this
+# window, and this comment does not claim it has: what the run does is settle
+# the question, and either answer is worth having. A refusal is recorded in
+# `trials.jsonl` with the realised figure, so the attempt is counted either way.
+turnover_budget_weekly = 0.25

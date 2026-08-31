@@ -3,6 +3,7 @@
 import pytest
 
 from crypto_momentum.config import ConfigError, RunConfig, load_config
+from crypto_momentum.costs import TOKOCRYPTO, TURNOVER_CEILING_WEEKLY
 
 VALID = """
 name = "skeleton-btcusdt-2021h1"
@@ -18,7 +19,7 @@ end_month = "2021-03"
 kind = "buy_and_hold"
 
 [costs]
-fee_bps_per_side = 40.44
+model = "tokocrypto"
 slippage_bps_per_side = 5.0
 """
 
@@ -40,7 +41,7 @@ def test_loads_a_valid_config(tmp_path):
         start_month="2021-01",
         end_month="2021-03",
         strategy_kind="buy_and_hold",
-        fee_bps_per_side=40.44,
+        cost_model=TOKOCRYPTO,
         slippage_bps_per_side=5.0,
     )
 
@@ -86,11 +87,102 @@ def test_an_unsupported_strategy_is_rejected(tmp_path):
         load_config(write(tmp_path, text))
 
 
-def test_a_negative_cost_is_rejected(tmp_path):
-    text = VALID.replace("fee_bps_per_side = 40.44", "fee_bps_per_side = -1.0")
+def test_a_negative_slippage_assumption_is_rejected(tmp_path):
+    text = VALID.replace("slippage_bps_per_side = 5.0", "slippage_bps_per_side = -1.0")
 
-    with pytest.raises(ConfigError, match="fee_bps_per_side"):
+    with pytest.raises(ConfigError, match="slippage_bps_per_side"):
         load_config(write(tmp_path, text))
+
+
+class TestTheCostModel:
+    """A run names a venue's cost structure; it does not invent basis points."""
+
+    def test_the_named_model_carries_its_components(self, tmp_path):
+        cfg = load_config(write(tmp_path, VALID))
+
+        assert cfg.cost_model is TOKOCRYPTO
+        assert cfg.cost_model.tax_bps_per_side == pytest.approx(21.0)
+        # The model's 40.44 plus the run's own 5bp slippage assumption.
+        assert cfg.cost_bps_per_side == pytest.approx(45.44)
+
+    def test_the_papers_model_is_selectable_for_a_replication(self, tmp_path):
+        text = VALID.replace('model = "tokocrypto"', 'model = "paper"')
+
+        cfg = load_config(write(tmp_path, text))
+
+        assert cfg.cost_model.name == "paper"
+        assert cfg.cost_bps_per_side == pytest.approx(20.0)
+
+    def test_a_config_cannot_write_its_own_cost_in_basis_points(self, tmp_path):
+        # The venue's cost structure is an ADR decision. A loose number here
+        # would be a result quoted net of a venue nobody chose.
+        text = VALID.replace('model = "tokocrypto"', "fee_bps_per_side = 12.0")
+
+        with pytest.raises(ConfigError, match="unknown key.*fee_bps_per_side"):
+            load_config(write(tmp_path, text))
+
+    def test_an_unknown_venue_names_the_models_that_exist(self, tmp_path):
+        text = VALID.replace('model = "tokocrypto"', 'model = "binance"')
+
+        with pytest.raises(ConfigError, match="paper, tokocrypto"):
+            load_config(write(tmp_path, text))
+
+    def test_there_is_no_funding_knob_to_set(self, tmp_path):
+        # v1 is unlevered long-only spot per ADR-0004 and holds no perpetual
+        # position. A funding rate here would read as a modelled assumption.
+        text = VALID.replace(
+            'model = "tokocrypto"', 'model = "tokocrypto"\nfunding_rate_8h = 0.0001'
+        )
+
+        with pytest.raises(ConfigError, match="unknown key.*funding_rate_8h"):
+            load_config(write(tmp_path, text))
+
+
+class TestTheTurnoverBudget:
+    """ADR-0007's ceiling, enforced at load time — before any bar is fetched."""
+
+    def test_omitting_the_budget_takes_the_full_ceiling(self, tmp_path):
+        cfg = load_config(write(tmp_path, VALID))
+
+        assert cfg.turnover_budget_weekly == TURNOVER_CEILING_WEEKLY
+
+    def test_a_tighter_budget_than_the_ceiling_is_allowed(self, tmp_path):
+        text = VALID.replace(
+            "slippage_bps_per_side = 5.0",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.1",
+        )
+
+        cfg = load_config(write(tmp_path, text))
+
+        assert cfg.turnover_budget_weekly == pytest.approx(0.1)
+
+    def test_a_budget_above_the_ceiling_is_rejected_before_the_run(self, tmp_path):
+        # The literature's ~68% weekly turnover, declared honestly. ADR-0007
+        # refuses it at the loader rather than executing and reporting it.
+        text = VALID.replace(
+            "slippage_bps_per_side = 5.0",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.68",
+        )
+
+        with pytest.raises(ConfigError, match="above the 25% weekly"):
+            load_config(write(tmp_path, text))
+
+    def test_the_ceiling_itself_is_exactly_on_the_line_and_allowed(self, tmp_path):
+        text = VALID.replace(
+            "slippage_bps_per_side = 5.0",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.25",
+        )
+
+        assert load_config(write(tmp_path, text)).turnover_budget_weekly == 0.25
+
+    def test_a_budget_of_nothing_is_rejected(self, tmp_path):
+        text = VALID.replace(
+            "slippage_bps_per_side = 5.0",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.0",
+        )
+
+        with pytest.raises(ConfigError, match="must be above 0"):
+            load_config(write(tmp_path, text))
 
 
 def test_a_wrong_type_is_rejected_rather_than_coerced(tmp_path):
@@ -155,7 +247,7 @@ bracket = "binance-full"
 liquidity_floor_usd = 100000.0
 
 [costs]
-fee_bps_per_side = 40.44
+model = "tokocrypto"
 slippage_bps_per_side = 5.0
 """
 

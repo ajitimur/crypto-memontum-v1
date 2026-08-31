@@ -317,6 +317,13 @@ ALLOWED_SIM_IMPORTS = {"__future__", "dataclasses", "math", "typing", "numpy", "
 # above it are exactly the ones that open sockets and files.
 SIM_PACKAGE = "crypto_momentum.sim"
 
+# The one exception, named rather than blanketed: `costs` is the ADR-0007 cost
+# models and the turnover ceiling, and it is as inert as the core itself — no
+# I/O, no clock, frozen dataclasses and arithmetic. It sits outside `sim/`
+# because the config loader is its other consumer, not because it is a layer
+# above. Anything else under `crypto_momentum` is still forbidden here.
+ALLOWED_SIM_INTERNAL_IMPORTS = {"crypto_momentum.costs"}
+
 # Reaching the outside world without an import: these are the ways in.
 FORBIDDEN_SIM_CALLS = {"open", "__import__", "eval", "exec", "compile", "input"}
 
@@ -334,12 +341,14 @@ def test_the_simulation_core_reaches_for_no_network_filesystem_or_clock():
                 modules = {node.module or ""}
             else:
                 continue
-            imported = {
-                module.split(".")[0]
+            outside = {
+                module
                 for module in modules
-                if not module.startswith(f"{SIM_PACKAGE}.") and module != SIM_PACKAGE
+                if not module.startswith(f"{SIM_PACKAGE}.")
+                and module != SIM_PACKAGE
+                and module not in ALLOWED_SIM_INTERNAL_IMPORTS
             }
-            forbidden = imported - ALLOWED_SIM_IMPORTS
+            forbidden = {module.split(".")[0] for module in outside} - ALLOWED_SIM_IMPORTS
             assert not forbidden, f"{module_path.name} imports {sorted(forbidden)}"
 
 

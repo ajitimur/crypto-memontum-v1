@@ -421,8 +421,9 @@ class TestCrossSectionalRun:
             cost_bps_per_side=0.0,
         )
 
-        # The first rebalance buys from an empty book, so it turns over the lot.
-        assert run.selections[0].turnover == pytest.approx(1.0)
+        # The first rebalance buys a whole book from cash and sells nothing, so
+        # one-way — half of everything that changed hands — it is 0.5.
+        assert run.selections[0].turnover == pytest.approx(0.5)
         assert 0.0 <= run.mean_rebalance_turnover <= 1.0
 
     def test_a_window_with_no_room_for_a_holding_period_is_refused(self):

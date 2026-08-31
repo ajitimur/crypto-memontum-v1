@@ -27,7 +27,7 @@ end_month = "2021-02"
 kind = "buy_and_hold"
 
 [costs]
-fee_bps_per_side = 40.44
+model = "tokocrypto"
 slippage_bps_per_side = 5.0
 """
 
@@ -40,6 +40,30 @@ def test_an_invalid_config_refuses_with_a_message_and_a_non_zero_exit(tmp_path, 
 
     assert exit_code == EXIT_REFUSED
     assert "start_month" in capsys.readouterr().err
+
+
+def test_a_config_over_the_turnover_ceiling_refuses_before_it_fetches_anything(
+    tmp_path, capsys
+):
+    # ADR-0007's ceiling at the loader. The window here is valid and the archive
+    # is never reachable in this test, so the run has to be refused on the budget
+    # alone — before a single bar would have been fetched.
+    config = tmp_path / "greedy.toml"
+    config.write_text(
+        BAD_CONFIG.replace('start_month = "not-a-month"', 'start_month = "2021-01"')
+        .replace(
+            "slippage_bps_per_side = 5.0",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.68",
+        )
+    )
+
+    exit_code = main(["--repo-root", str(tmp_path), "run", str(config)])
+
+    err = capsys.readouterr().err
+    assert exit_code == EXIT_REFUSED
+    assert "turnover_budget_weekly" in err
+    assert "25% weekly" in err
+    assert not any(tmp_path.rglob("*.zip"))
 
 
 def test_trials_reports_how_many_configurations_were_tried(tmp_path, capsys):
@@ -77,6 +101,39 @@ def test_a_liquidated_trial_reports_its_count_and_dates(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "liquidation=1 event" in out
     assert "2021-07-07T00:00:00Z" in out
+
+
+def test_a_refused_trial_says_why_rather_than_reading_as_a_blank_result(tmp_path, capsys):
+    """A configuration rejected on its merits must not print like a failed one."""
+    append_trial(
+        tmp_path / "trials.jsonl",
+        {
+            "config_name": "too-hungry",
+            "refused": "turnover_budget_breached",
+            "weekly_rebalance_turnover": 0.5,
+            "turnover_budget_weekly": 0.25,
+        },
+    )
+
+    assert main(["--repo-root", str(tmp_path), "trials"]) == 0
+    out = capsys.readouterr().out
+    assert "refused=turnover_budget_breached" in out
+    assert "weekly_turnover=50.0% vs budget 25.0%" in out
+    # It produced no metrics, so it must not claim a net return or a liquidation
+    # verdict — those are the absences that would read as measurements.
+    assert "net_return" not in out
+    assert "liquidation" not in out
+
+
+def test_a_refused_trial_is_still_one_of_the_configurations_tried(tmp_path, capsys):
+    append_trial(tmp_path / "trials.jsonl", {"config_name": "ok", "net_return": 0.1})
+    append_trial(
+        tmp_path / "trials.jsonl",
+        {"config_name": "refused", "refused": "turnover_budget_breached"},
+    )
+
+    assert main(["--repo-root", str(tmp_path), "trials"]) == 0
+    assert "2 configurations tried" in capsys.readouterr().out
 
 
 def test_a_trial_logged_before_daily_marking_does_not_claim_it_survived(tmp_path, capsys):

@@ -36,7 +36,7 @@ from crypto_momentum.policy import (
     policy_root,
 )
 from crypto_momentum.provenance import describe_head
-from crypto_momentum.results import ResultStore, RunRecord
+from crypto_momentum.results import ResultStore, RunRecord, refused_trial_line
 from crypto_momentum.sim.benchmarks import (
     BENCHMARK_SYMBOL,
     btc_buy_and_hold,
@@ -48,7 +48,11 @@ from crypto_momentum.sim.buy_and_hold import (
     hold_metadata,
     simulate_buy_and_hold,
 )
-from crypto_momentum.sim.cross_sectional import CrossSectionalRun, simulate_cross_sectional
+from crypto_momentum.sim.cross_sectional import (
+    CrossSectionalRun,
+    TurnoverBudgetBreached,
+    simulate_cross_sectional,
+)
 from crypto_momentum.sim.report import RunResult
 from crypto_momentum.sim.universe_policy import (
     TOKOCRYPTO,
@@ -110,26 +114,56 @@ def run_config(
 
     `run_at_utc` is passed in rather than read from the clock, so the runner
     itself stays reproducible; the CLI supplies the wall-clock value.
+
+    A run refused for breaching its turnover budget still appends a line to the
+    trials log before the exception leaves here. It is a configuration that was
+    tried and rejected on its merits, not a malformed file, and both the
+    reporting protocol and the out-of-sample invariant want the count of
+    configurations tried to be complete. No result file is written: there is no
+    result, which is the point.
     """
     config_path = Path(config_path)
     config = load_config(config_path)
     config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
     provenance = describe_head(workspace.repo_root)
 
-    if config.strategy_kind == CROSS_SECTIONAL:
-        output = _run_cross_sectional(
-            config, workspace, run_at_utc=run_at_utc, open_url=open_url
-        )
-    else:
-        output = _run_single_asset(
-            config, workspace, run_at_utc=run_at_utc, open_url=open_url
-        )
-
+    # Taken before the run either way: a refused configuration is one of the
+    # configurations tried, so its trials line carries the same counts a
+    # recorded one does. The log is appended below, so both paths see the same
+    # numbers whichever way the run ends.
     counts = _counts_tried(
         workspace.trials_path,
         config_sha256=config_sha256,
         strategy_kind=config.strategy_kind,
     )
+
+    try:
+        if config.strategy_kind == CROSS_SECTIONAL:
+            output = _run_cross_sectional(
+                config, workspace, run_at_utc=run_at_utc, open_url=open_url
+            )
+        else:
+            output = _run_single_asset(
+                config, workspace, run_at_utc=run_at_utc, open_url=open_url
+            )
+    except TurnoverBudgetBreached as breach:
+        append_trial(
+            workspace.trials_path,
+            refused_trial_line(
+                config,
+                commit=provenance.commit,
+                working_tree_dirty=provenance.working_tree_dirty,
+                run_at_utc=run_at_utc,
+                config_path=_relative_to_repo(config_path, workspace.repo_root),
+                config_sha256=config_sha256,
+                configurations_tried=counts.configurations_tried,
+                trials_recorded=counts.trials_recorded,
+                realised_weekly_turnover=breach.realised_weekly_turnover,
+                budget=breach.budget,
+                reason=str(breach),
+            ),
+        )
+        raise
     record = RunRecord(
         commit=provenance.commit,
         working_tree_dirty=provenance.working_tree_dirty,
@@ -139,6 +173,7 @@ def run_config(
         config_path=_relative_to_repo(config_path, workspace.repo_root),
         metrics=output.metrics,
         window=output.window,
+        costs=cost_metadata(config),
         portfolio=output.portfolio,
         benchmarks=output.benchmarks,
         # This run counts in both: it is one of the configurations the number
@@ -252,6 +287,7 @@ def _run_cross_sectional(
         min_universe=config.min_universe,
         max_cap_staleness_days=config.max_cap_staleness_days,
         cost_bps_per_side=config.cost_bps_per_side,
+        turnover_budget_weekly=config.turnover_budget_weekly,
     )
 
     # The market portfolio runs on the same Universe, the same panel and the
@@ -657,6 +693,21 @@ def metrics_of(result: RunResult) -> dict[str, Any]:
         "max_drawdown_trough_ts_utc": _iso(result.max_drawdown_trough_ts_utc),
         "cost_drag_annualised": result.cost_drag_annualised,
         "cost_drag_as_fraction_of_gross": result.cost_drag_as_fraction_of_gross,
+    }
+
+
+def cost_metadata(config: RunConfig) -> dict[str, Any]:
+    """What the result records about the cost world the run was priced in.
+
+    The model's components rather than the single figure the walk charged: a
+    result that says only "45.44 bps" cannot be read back against ADR-0007's
+    table, and cannot be compared to the paper's own 15bp assumption without
+    someone re-deriving which parts of it were tax.
+    """
+    return {
+        **config.cost_model.to_metadata(),
+        "slippage_bps_per_side": config.slippage_bps_per_side,
+        "total_bps_per_side": config.cost_bps_per_side,
     }
 
 

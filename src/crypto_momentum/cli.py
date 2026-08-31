@@ -36,7 +36,11 @@ from crypto_momentum.runner import (
     run_config,
 )
 from crypto_momentum.sim.buy_and_hold import NotEnoughBars
-from crypto_momentum.sim.cross_sectional import NotEnoughHistory, SelectionError
+from crypto_momentum.sim.cross_sectional import (
+    NotEnoughHistory,
+    SelectionError,
+    TurnoverBudgetBreached,
+)
 from crypto_momentum.sim.report import PROFITABILITY_T_BAR
 from crypto_momentum.sim.universe_policy import PolicyError
 from crypto_momentum.trials import read_trials
@@ -68,6 +72,9 @@ REFUSALS = (
     SelectionError,
     SurvivorshipBiasedPanel,
     SymbolNotCovered,
+    # A breach of ADR-0007's turnover budget is a refusal like any other: the
+    # config is one we will not trade, and saying so in a line is the answer.
+    TurnoverBudgetBreached,
     UniverseError,
     UnmappableSymbol,
 )
@@ -184,12 +191,28 @@ def _trials(workspace: Workspace) -> int:
     plural = "" if len(trials) == 1 else "s"
     print(f"{len(trials)} configuration{plural} tried")
     for trial in trials:
-        print(
-            f"  {trial.get('run_at_utc')}  {trial.get('config_name')}  "
-            f"net_return={trial.get('net_return')}  "
-            f"liquidation={_describe_liquidation(trial)}"
-        )
+        print(f"  {trial.get('run_at_utc')}  {trial.get('config_name')}  {_outcome(trial)}")
     return 0
+
+
+def _outcome(reported: dict) -> str:
+    """What the configuration gave, or why it gave nothing.
+
+    A run refused on its turnover budget produced no metrics, so printing
+    `net_return=None` beside it would render a configuration rejected on its
+    merits identically to a result that failed to record — the same confusion of
+    an absence with a value that `_describe_liquidation` exists to avoid.
+    """
+    if reported.get("refused"):
+        realised = reported.get("weekly_rebalance_turnover")
+        budget = reported.get("turnover_budget_weekly")
+        measured = "unmeasured" if realised is None else f"{realised:.1%}"
+        allowed = "unstated" if budget is None else f"{budget:.1%}"
+        return f"refused={reported['refused']}  weekly_turnover={measured} vs budget {allowed}"
+    return (
+        f"net_return={reported.get('net_return')}  "
+        f"liquidation={_describe_liquidation(reported)}"
+    )
 
 
 def _describe_liquidation(reported: dict) -> str:

@@ -23,6 +23,7 @@ import pytest
 from crypto_momentum.data.cmc_panel import CmcPanelStore
 from crypto_momentum.data.fetch import ArchiveUnavailable
 from crypto_momentum.runner import Workspace, run_config
+from crypto_momentum.sim.cross_sectional import TurnoverBudgetBreached
 from crypto_momentum.trials import read_trials
 
 RUN_AT = "2026-08-31T09:00:00Z"
@@ -78,7 +79,7 @@ quantile = 0.2
 bracket = "binance-full"
 
 [costs]
-fee_bps_per_side = 40.44
+model = "tokocrypto"
 slippage_bps_per_side = 5.0
 """
 
@@ -278,6 +279,92 @@ def test_costs_are_charged_inside_the_path_not_deducted_from_it(record):
     assert record.metrics["cost_bps_per_side"] == pytest.approx(45.44)
     assert record.metrics["net_return"] < record.metrics["gross_return"]
     assert record.metrics["cost_drag_annualised"] > 0.0
+
+
+def test_the_result_says_which_cost_world_it_was_priced_in(record):
+    costs = record.costs
+
+    # The components, not just the total: a net figure that cannot be read back
+    # against ADR-0007's table is not a result under the Net invariant.
+    assert costs["cost_model"] == "tokocrypto"
+    assert costs["fee_bps_per_side"] == pytest.approx(15.0)
+    assert costs["tax_bps_per_side"] == pytest.approx(21.0)
+    assert costs["levy_bps_per_side"] == pytest.approx(4.44)
+    assert costs["tax_charged_on_buys"] is True
+    assert costs["slippage_bps_per_side"] == pytest.approx(5.0)
+    assert costs["total_bps_per_side"] == pytest.approx(45.44)
+
+
+def test_the_result_carries_no_funding_model(record):
+    # ADR-0004: unlevered long-only spot holds no perpetual position, so there is
+    # no funding leg. Stated in words, and deliberately not as a zero rate — a
+    # rate would read as a funding model that happened to price at nothing.
+    assert "funding_bps" not in record.costs
+    assert record.costs["funding"].startswith("none")
+    assert "perpetual" in record.costs["funding"]
+
+
+def test_cost_drag_is_reported_annualised_and_against_gross(record):
+    metrics = record.metrics
+
+    # Both readings, per the reporting protocol. The annualised figure
+    # extrapolates a 74-day window and so is large; the fraction is the
+    # scale-free one the one-third ceiling applies to.
+    assert metrics["cost_drag_annualised"] == pytest.approx(
+        metrics["ann_return_gross"] - metrics["ann_return_net"]
+    )
+    assert metrics["cost_drag_as_fraction_of_gross"] == pytest.approx(
+        metrics["cost_drag_annualised"] / metrics["ann_return_gross"]
+    )
+
+
+def test_rebalance_turnover_is_reported_against_the_ceiling(record):
+    portfolio = record.portfolio
+
+    # The rebalance is weekly, so the per-rebalance figure and the weekly one
+    # coincide here — which is exactly why a fortnightly cell needs the second.
+    assert portfolio["weekly_rebalance_turnover"] == pytest.approx(
+        portfolio["mean_rebalance_turnover"]
+    )
+    assert portfolio["turnover_ceiling_weekly"] == 0.25
+    assert portfolio["turnover_budget_weekly"] == 0.25
+    # The run got as far as being recorded, so it stayed inside its budget.
+    assert portfolio["weekly_rebalance_turnover"] <= 0.25
+    # And it is far inside it, for a reason worth naming rather than pinning to a
+    # number: six names at a fifth is a two-name book, and over Q1 2021 the same
+    # two lead the ranking almost every week. What little turns over is drift in
+    # their value weights, not the book changing hands. A real cross-section is
+    # the case the ceiling exists for, and this fixture is not one.
+    assert portfolio["weekly_rebalance_turnover"] < 0.01
+
+
+def test_a_run_refused_on_turnover_is_still_counted_as_a_configuration_tried(
+    workspace, config_path, archive
+):
+    # A budget of 0.1% weekly against a run that turns over more. The refusal is
+    # the point — but the reporting protocol asks for the count of
+    # configurations tried, and this one was tried. It is counted, with the
+    # figure that refused it, and no result file is written because there is no
+    # result to write.
+    config_path.write_text(
+        CONFIG_TEXT.replace(
+            "slippage_bps_per_side = 5.0",
+            "slippage_bps_per_side = 5.0\nturnover_budget_weekly = 0.001",
+        )
+    )
+
+    with pytest.raises(TurnoverBudgetBreached):
+        run_config(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    trial = read_trials(workspace.trials_path)[0]
+    assert trial["config_name"] == "xsec-l14-h7-2021q1"
+    assert trial["refused"] == "turnover_budget_breached"
+    assert trial["turnover_budget_weekly"] == 0.001
+    assert trial["weekly_rebalance_turnover"] > 0.001
+    # No metrics: nothing was produced, and an absent net_return is honest where
+    # a zero would read as a run that broke even.
+    assert "net_return" not in trial
+    assert not any(workspace.results_root.rglob("*.json"))
 
 
 def test_the_trials_log_carries_the_shape_of_the_portfolio(workspace, config_path, archive):
