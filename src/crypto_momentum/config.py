@@ -104,7 +104,7 @@ class RunConfig:
     turnover_budget_weekly: float = TURNOVER_CEILING_WEEKLY
     # The Grid this config stands for, if it stands for one. A grid config
     # names no single cell: `lookback_days` and `holding_days` are unset, and
-    # `cell_configs` expands it into the runs that do name them.
+    # `cell_config` fills them in per cell of `cells()`.
     grid: str | None = None
     lookback_days: int | None = None
     holding_days: int | None = None
@@ -124,17 +124,13 @@ class RunConfig:
         """
         return self.grid is not None
 
-    def cell_configs(self) -> tuple["RunConfig", ...]:
-        """The Grid expanded into one runnable config per cell, in the grid's order.
+    def cells(self) -> tuple[GridCell, ...]:
+        """The cells of this config's Grid, in the grid's own order.
 
-        Each cell is the whole config over again with the two knobs the grid
-        stands in for filled in, so a cell differs from a hand-written config for
-        the same pair in nothing but its name. Empty for a config that is not a
-        grid, so callers can ask without checking first.
+        Empty for a config that is not a grid, so a caller can ask without
+        checking first.
         """
-        if self.grid is None:
-            return ()
-        return tuple(self.cell_config(cell) for cell in grid_named(self.grid))
+        return () if self.grid is None else grid_named(self.grid)
 
     def cell_config(self, cell: GridCell) -> "RunConfig":
         """This config as it stands for one cell of its Grid.

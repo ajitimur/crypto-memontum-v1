@@ -174,7 +174,12 @@ def _grid(config_path: Path, workspace: Workspace) -> int:
         f"{record.n_refused} refused, {record.n_liquidated} liquidated",
         file=sys.stderr,
     )
-    print(f"{'cell':>10}  {'sharpe':>8}  {'t(log)':>8}  {'turnover':>9}  outcome", file=sys.stderr)
+    # "turnover/wk" rather than "turnover": CONTEXT.md reserves the bare word,
+    # and this column is Rebalance Turnover on a weekly basis.
+    print(
+        f"{'cell':>10}  {'sharpe':>8}  {'t(log)':>8}  {'turnover/wk':>11}  outcome",
+        file=sys.stderr,
+    )
     for cell in record.cells:
         print(f"{cell.name:>10}  {_describe_cell(cell)}", file=sys.stderr)
     print(f"configurations tried: {record.configurations_tried}", file=sys.stderr)
@@ -193,18 +198,17 @@ def _describe_cell(cell: GridCellRecord) -> str:
     A refused cell prints its reason where its numbers would be, rather than
     dashes across the row — it was tried, and what stopped it is the finding.
     """
-    if cell.outcome != "recorded":
-        return f"{'—':>8}  {'—':>8}  {'—':>9}  refused: {cell.refused}"
-    sharpe = cell.metrics.get("sharpe_net")
-    t_statistic = cell.metrics.get("mean_log_return_t_stat")
-    turnover = cell.weekly_rebalance_turnover
-    liquidations = cell.metrics.get("liquidation_count", 0)
-    outcome = "liquidated" if liquidations else (
-        "clears hurdle" if cell.clears_deployment_hurdle else "below hurdle"
+    if not cell.recorded:
+        return f"{'—':>8}  {'—':>8}  {'—':>11}  refused: {cell.refused}"
+    outcome = (
+        "liquidated"
+        if cell.liquidated
+        else ("clears hurdle" if cell.clears_deployment_hurdle else "below hurdle")
     )
     return (
-        f"{_number(sharpe):>8}  {_number(t_statistic):>8}  "
-        f"{_percent(turnover):>9}  {outcome}"
+        f"{_number(cell.metrics.get('sharpe_net')):>8}  "
+        f"{_number(cell.metrics.get('mean_log_return_t_stat')):>8}  "
+        f"{_percent(cell.weekly_rebalance_turnover):>11}  {outcome}"
     )
 
 

@@ -69,11 +69,10 @@ class RunRecord:
     # `sim/grid.py`, so a cell says which grid it belongs to and not merely that
     # it belongs to one.
     grid: str = ""
-    # The directory the cell is filed under, which is the *grid config's* name
-    # rather than the published grid's. Two configs running `han-kang-ryu-21`
-    # over different windows are two grids, and filing both under the published
-    # name would have the second overwrite the first.
-    group: str = ""
+    # Two configs running `han-kang-ryu-21` over different windows are two
+    # grids, so the cells are filed under the config's name and not the
+    # published grid's — under which the second would overwrite the first.
+    grid_config_name: str = ""
     # Which of the configurations tried this one is — see
     # `configuration_fingerprint`. Empty falls back to the config file's digest,
     # which is what it is for anything that is not a grid cell.
@@ -294,6 +293,19 @@ class GridCellRecord:
     refused: str | None = None
     refused_reason: str | None = None
 
+    @property
+    def recorded(self) -> bool:
+        return self.outcome == RECORDED
+
+    @property
+    def liquidated(self) -> bool:
+        """Whether the cell was wiped out mid-holding-period, per ADR-0001.
+
+        Read off the count rather than compared against it at each call site, so
+        the grid's tally and the line a researcher reads cannot disagree.
+        """
+        return self.metrics.get("liquidation_count", 0) > 0
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "cell": self.name,
@@ -335,7 +347,7 @@ class GridRecord:
 
     @property
     def n_recorded(self) -> int:
-        return sum(1 for cell in self.cells if cell.outcome == RECORDED)
+        return sum(1 for cell in self.cells if cell.recorded)
 
     @property
     def n_refused(self) -> int:
@@ -349,11 +361,7 @@ class GridRecord:
         is read against that number, so it is counted here rather than derived
         by whoever opens the file.
         """
-        return sum(
-            1
-            for cell in self.cells
-            if cell.metrics.get("liquidation_count", 0) > 0
-        )
+        return sum(1 for cell in self.cells if cell.liquidated)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -409,7 +417,7 @@ class ResultStore:
             record.commit,
             record.config.name,
             working_tree_dirty=record.working_tree_dirty,
-            grid=record.group,
+            grid=record.grid_config_name,
         )
         return _written(path, record.to_dict())
 

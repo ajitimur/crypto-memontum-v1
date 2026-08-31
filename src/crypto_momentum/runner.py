@@ -70,7 +70,7 @@ from crypto_momentum.sim.cross_sectional import (
     TurnoverBudgetBreached,
     simulate_cross_sectional,
 )
-from crypto_momentum.sim.grid import GridCell, grid_named
+from crypto_momentum.sim.grid import GridCell
 from crypto_momentum.sim.report import RunResult
 from crypto_momentum.sim.universe_policy import (
     TOKOCRYPTO,
@@ -189,7 +189,7 @@ def _run_one(
     config_path: str,
     cross_section: "CrossSection | None",
     grid: str = "",
-    group: str = "",
+    grid_config_name: str = "",
     fingerprint: str = "",
 ) -> RunRecord:
     """One run, simulated and recorded — whether it is a config or a grid cell.
@@ -227,7 +227,7 @@ def _run_one(
                 config, workspace, run_at_utc=run_at_utc, open_url=open_url
             )
     except CELL_REFUSALS as refusal:
-        breach = refusal if isinstance(refusal, TurnoverBudgetBreached) else None
+        described = describe_refusal(refusal)
         append_trial(
             workspace.trials_path,
             refused_trial_line(
@@ -241,12 +241,10 @@ def _run_one(
                 grid=grid,
                 configurations_tried=counts.configurations_tried,
                 trials_recorded=counts.trials_recorded,
-                refused=refusal_slug(refusal),
-                reason=str(refusal),
-                realised_weekly_turnover=(
-                    None if breach is None else breach.realised_weekly_turnover
-                ),
-                budget=None if breach is None else breach.budget,
+                refused=described.slug,
+                reason=described.reason,
+                realised_weekly_turnover=described.realised_weekly_turnover,
+                budget=described.budget,
             ),
         )
         raise
@@ -267,7 +265,7 @@ def _run_one(
         configurations_tried=counts.configurations_tried,
         trials_recorded=counts.trials_recorded,
         grid=grid,
-        group=group,
+        grid_config_name=grid_config_name,
         fingerprint=fingerprint,
     )
     ResultStore(workspace.results_root).write(record)
@@ -319,7 +317,7 @@ def run_grid(
     )
 
     cells: list[GridCellRecord] = []
-    for cell in grid_named(config.grid):
+    for cell in config.cells():
         cell_config = config.cell_config(cell)
         fingerprint = configuration_fingerprint(config_sha256, cell=cell.name)
         try:
@@ -333,12 +331,13 @@ def run_grid(
                 config_path=relative_path,
                 cross_section=cross_section,
                 grid=config.grid,
-                group=config.name,
+                grid_config_name=config.name,
                 fingerprint=fingerprint,
             )
         except CELL_REFUSALS as refusal:
             # `_run_one` has already appended the trials line, so the cell is
-            # counted whichever way it ended.
+            # counted whichever way it ended, and off the same description.
+            described = describe_refusal(refusal)
             cells.append(
                 GridCellRecord(
                     lookback_days=cell.lookback_days,
@@ -346,13 +345,9 @@ def run_grid(
                     name=cell.name,
                     config_name=cell_config.name,
                     outcome=REFUSED,
-                    refused=refusal_slug(refusal),
-                    refused_reason=str(refusal),
-                    weekly_rebalance_turnover=(
-                        refusal.realised_weekly_turnover
-                        if isinstance(refusal, TurnoverBudgetBreached)
-                        else None
-                    ),
+                    refused=described.slug,
+                    refused_reason=described.reason,
+                    weekly_rebalance_turnover=described.realised_weekly_turnover,
                 )
             )
             continue
@@ -394,9 +389,9 @@ def _recorded_cell(cell: GridCell, record: RunRecord) -> GridCellRecord:
     )
 
 
-# A slug per refusal, rather than its message, so a reader can count the cells
-# that failed the same way without matching on prose. Ordered subclass-first,
-# since `refusal_slug` takes the first that matches.
+# A slug per refusal, rather than its message, so a reader can count the runs
+# that failed the same way without matching on prose. The four are siblings, not
+# a hierarchy, so the order here is only the order they are searched in.
 _REFUSAL_SLUGS: tuple[tuple[type[Exception], str], ...] = (
     (TurnoverBudgetBreached, TURNOVER_BUDGET_BREACHED),
     (NotEnoughHistory, "not_enough_history"),
@@ -405,14 +400,35 @@ _REFUSAL_SLUGS: tuple[tuple[type[Exception], str], ...] = (
 )
 
 
-def refusal_slug(refusal: Exception) -> str:
-    """The short name a refusal is recorded under in the trials log and the grid."""
+@dataclass(frozen=True)
+class Refusal:
+    """A refusal reduced to what gets recorded, in one place.
+
+    The trials line and the grid's cell both want the same four facts, and one
+    of them — the realised turnover — exists only for a breach. Deriving that
+    twice is how the log and the grid come to disagree about the same cell.
+    """
+
+    slug: str
+    reason: str
+    realised_weekly_turnover: float | None
+    budget: float | None
+
+
+def describe_refusal(refusal: Exception) -> Refusal:
+    """What a refused run records about why it produced nothing."""
+    breach = refusal if isinstance(refusal, TurnoverBudgetBreached) else None
     for kind, slug in _REFUSAL_SLUGS:
         if isinstance(refusal, kind):
-            return slug
-    # Unreachable while this is only called on a `CELL_REFUSALS` catch, but a
-    # wrong slug would be worse than an honest one if that ever changes.
-    return "refused"
+            break
+    else:  # pragma: no cover — only reachable if CELL_REFUSALS grows past the slugs
+        slug = "refused"
+    return Refusal(
+        slug=slug,
+        reason=str(refusal),
+        realised_weekly_turnover=None if breach is None else breach.realised_weekly_turnover,
+        budget=None if breach is None else breach.budget,
+    )
 
 
 def _run_single_asset(

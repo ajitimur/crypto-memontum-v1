@@ -46,7 +46,15 @@ kind = "cross_sectional"
 # `sim/grid.py` beside their citation and a config chooses between grids rather
 # than composing one. `lookback_days` and `holding_days` are the grid's to set.
 grid = "han-kang-ryu-21"
-# The top quintile.
+# The top quintile, matching `xsec-l14-h7-2021h1.toml` so the two are readable
+# against each other.
+#
+# Recorded as a known comparability gap for the Replication Gate (#11): the
+# criterion Han et al. select these 21 pairs by is the signal among the **top 5%**
+# of coins, not the top quintile. Their Table 14 reports the pairs on the full
+# cross-section, which is what this compares against, but the pairs themselves
+# were chosen on a narrower universe. The gate should expect that to cost it
+# some rank correlation and should not read the shortfall as a pipeline fault.
 quantile = 0.2
 
 [universe]

@@ -49,8 +49,8 @@ class GridCell:
     def name(self) -> str:
         """The cell's identifier, used as a config name suffix and a results path.
 
-        Short and filename-safe, because it is appended to the grid's own name to
-        key the cell's result — see `config.RunConfig.cell_configs`.
+        Short and filename-safe, because it is appended to the grid config's own
+        name to key the cell's result — see `config.RunConfig.cell_config`.
         """
         return f"l{self.lookback_days}-h{self.holding_days}"
 

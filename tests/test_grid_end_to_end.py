@@ -119,6 +119,30 @@ def test_each_cell_counts_as_its_own_configuration_tried(grid, workspace):
     assert len({trial["configuration_fingerprint"] for trial in trials}) == 21
 
 
+def test_a_hand_written_cell_counts_separately_from_the_grid_s_own(
+    workspace, config_path, archive
+):
+    """A config written by hand for (14, 7) and the grid's own l14-h7 cell are
+    two configurations tried, not one — they are different bytes, run on
+    different occasions, and the count the protocol asks for is a count of
+    attempts. It errs high on purpose: the number exists to make multiple
+    testing visible, and a count that collapsed re-runs of the same pair would
+    understate exactly what it is there to show."""
+    by_hand = config_path.parent / "one-cell.toml"
+    by_hand.write_text(
+        GRID_TEXT.replace("xsec-grid-2021q1", "xsec-one-cell").replace(
+            'grid = "han-kang-ryu-21"', "lookback_days = 14\nholding_days = 7"
+        )
+    )
+    run_config(by_hand, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    grid = run_grid(config_path, workspace, run_at_utc=RUN_AT, open_url=archive)
+
+    # The hand-written run plus 21 cells, none of them folded into another.
+    assert grid.configurations_tried == 22
+    assert grid.trials_recorded == 22
+
+
 def test_a_refused_cell_does_not_stop_the_grid(workspace, config_path, archive):
     # A budget every cell breaches. The grid still runs all 21 and records each
     # refusal with the figure that caused it — a grid that stopped on the first

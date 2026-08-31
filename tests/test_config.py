@@ -366,7 +366,7 @@ class TestGridConfig:
     def test_the_grid_expands_to_twenty_one_runnable_cells(self, tmp_path):
         cfg = load_config(write(tmp_path, GRID))
 
-        cells = cfg.cell_configs()
+        cells = cfg.cells()
 
         assert len(cells) == 21
         assert [(c.lookback_days, c.holding_days) for c in cells[:2]] == [(1, 7), (1, 14)]
@@ -374,7 +374,7 @@ class TestGridConfig:
     def test_a_cell_carries_the_whole_config_but_its_own_two_knobs(self, tmp_path):
         cfg = load_config(write(tmp_path, GRID))
 
-        cell = cfg.cell_configs()[13]
+        cell = cfg.cell_config(cfg.cells()[13])
 
         assert (cell.lookback_days, cell.holding_days) == (14, 7)
         assert cell.name == "xsec-grid-2021h1-l14-h7"
@@ -390,7 +390,7 @@ class TestGridConfig:
 
         assert cfg.grid is None
         assert not cfg.is_grid
-        assert cfg.cell_configs() == ()
+        assert cfg.cells() == ()
 
     def test_naming_a_grid_and_a_lookback_at_once_is_rejected(self, tmp_path):
         text = GRID.replace(
