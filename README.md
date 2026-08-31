@@ -19,6 +19,7 @@ appends one line to `trials.jsonl`.
 
 ```sh
 uv run momentum build-derived configs/skeleton-btcusdt-2021q1.toml  # rebuild without fetching
+uv run momentum pull-cmc-panel                                      # the one-time market-cap pull
 uv run momentum trials                                              # every configuration tried
 ```
 
@@ -30,7 +31,8 @@ uv run momentum trials                                              # every conf
 | `data/derived/` | Bars rebuilt from raw by `momentum build-derived`. Disposable — delete it and the next run rebuilds it. Gitignored. |
 | `results/` | One JSON result per `(commit, config)`. Gitignored. |
 | `trials.jsonl` | Every run ever made, appended, git-tracked. The count of configurations tried that every reported result has to quote. |
-| `configs/` | Run configs. Inert TOML — the loader validates and cannot execute. |
+| `configs/` | Run configs and `vendor-symbol-map.toml`. Inert TOML — the loader validates and cannot execute. |
+| `scripts/pull_cmc_panel.R` | The one-time `crypto2` pull. Needs R; run once, never again. Both window bounds are required — it will not read the clock. |
 | `src/crypto_momentum/sim/` | The simulation core. No network, no filesystem, no clock; a test asserts it. |
 
 ## Data source
@@ -40,3 +42,32 @@ concatenated base+quote uppercase (`BTCUSDT`); bars are indexed on their UTC
 `open_time`, so a `1d` bar stamped `2021-01-01` covers that whole UTC day. The
 archive switched its timestamp unit from milliseconds to microseconds in 2025;
 the adapter reads both, and a recorded fixture from each era pins it.
+
+## Market caps and the symbol mapping
+
+Value weighting, the cap-weighted market portfolio and Churn need market
+capitalisation, which the Binance archive does not publish. ADR-0008 buys it
+with a single immutable `crypto2` pull of CoinMarketCap's survivorship-free
+`listings/historical` endpoint, stored as one checksummed CSV under
+`data/raw/coinmarketcap/`.
+
+`pull-cmc-panel` is a no-op once that file exists — it does not re-fetch, which
+is the whole discipline, since the route uses undocumented endpoints and every
+extra call risks an IP ban. A panel that does not list assets known to have died
+is rejected before it reaches `data/raw/`, because a survivorship-biased panel
+looks entirely normal in aggregate. Running the pull needs R with `crypto2`
+installed; nothing else in the repo does.
+
+Joining the two vendors needs a symbol mapping, and ADR-0008 names it the known
+bug surface. It is time-varying by construction: a CoinMarketCap id is
+permanent, a Binance base is a name Binance reuses. Binance reassigned
+`LUNAUSDT` to Terra 2.0 on 2022-05-31 while the original chain became `LUNC`, so
+there is no answer to "what is LUNA" — only to "what was LUNA on this date".
+`vendor_symbol_map` is the entry point: it derives most links from the panel's
+own renames, then applies `configs/vendor-symbol-map.toml` on top. The table
+earns its place because the vendor's snapshot grid is not the venue's cutover
+date — CoinMarketCap moves id 4172 to LUNC on its own schedule, Binance renamed
+on 2022-05-31, and the bar that fills an order is a Binance bar. A mapping where
+one base means two assets on one day raises rather than resolving itself, and
+assets on one vendor and not the other are reported as unmatched rather than
+dropped.

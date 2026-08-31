@@ -1,4 +1,4 @@
-"""`momentum` — run a config, rebuild derived data, or read the trials log."""
+"""`momentum` — run a config, rebuild derived data, pull the panel, or read trials."""
 
 from __future__ import annotations
 
@@ -11,6 +11,16 @@ from typing import Sequence
 
 from crypto_momentum.config import ConfigError, load_config
 from crypto_momentum.data.binance_archive import ChecksumMismatch, MalformedArchiveFile
+from crypto_momentum.data.cmc_panel import (
+    CmcPanelStore,
+    MalformedPanel,
+    PanelAlreadyStored,
+    PanelMissing,
+    PanelPullFailed,
+    PanelWindowNotCovered,
+    SurvivorshipBiasedPanel,
+    pull_panel,
+)
 from crypto_momentum.data.fetch import ArchiveUnavailable
 from crypto_momentum.data.raw_store import RawWindowAlreadyStored, RawWindowMissing
 from crypto_momentum.derive import GapInWindow
@@ -29,10 +39,16 @@ REFUSALS = (
     ConfigError,
     GapInWindow,
     MalformedArchiveFile,
+    MalformedPanel,
     NotAGitRepository,
     NotEnoughBars,
+    PanelAlreadyStored,
+    PanelMissing,
+    PanelPullFailed,
+    PanelWindowNotCovered,
     RawWindowAlreadyStored,
     RawWindowMissing,
+    SurvivorshipBiasedPanel,
 )
 
 
@@ -54,6 +70,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     build.add_argument("config", type=Path)
 
+    subcommands.add_parser(
+        "pull-cmc-panel",
+        help="pull the CoinMarketCap market-cap panel once (ADR-0008); a no-op if stored",
+    )
+
     subcommands.add_parser("trials", help="show every configuration tried")
 
     args = parser.parse_args(argv)
@@ -64,6 +85,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run(args.config, workspace)
         if args.command == "build-derived":
             return _build_derived(args.config, workspace)
+        if args.command == "pull-cmc-panel":
+            return _pull_cmc_panel(workspace)
         return _trials(workspace)
     except REFUSALS as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr)
@@ -92,6 +115,33 @@ def _build_derived(config_path: Path, workspace: Workspace) -> int:
     config = load_config(config_path)
     bars = rebuild_derived(config, workspace)
     print(f"rebuilt {len(bars)} {config.interval} bars for {config.symbol} from data/raw/")
+    return 0
+
+
+def _pull_cmc_panel(workspace: Workspace) -> int:
+    """Pull the panel if it is absent, and say plainly when it is not.
+
+    The wall clock is read here, at the edge, and passed down as a parameter.
+    """
+    store = CmcPanelStore(workspace.raw_root)
+    already_stored = store.has_panel()
+    path = pull_panel(
+        store,
+        pulled_at_utc=datetime.now(UTC).strftime(ISO_SECONDS),
+        repo_root=workspace.repo_root,
+    )
+    manifest = store.manifest()
+    if already_stored:
+        print(
+            f"the panel is already at {path}, pulled {manifest['pulled_at_utc']}. "
+            "Per ADR-0008 it is pulled once; nothing was fetched."
+        )
+        return 0
+    print(
+        f"pulled {manifest['assets']} assets from {manifest['first_snapshot']} to "
+        f"{manifest['last_snapshot']} into {path}\n"
+        f"  sha256 {manifest['sha256']}"
+    )
     return 0
 
 
