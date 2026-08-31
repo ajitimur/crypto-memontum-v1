@@ -1,0 +1,66 @@
+# The first real cross-sectional cell: 14-day lookback, weekly holding period.
+#
+# One cell of the Grid, not the Grid — issue #10 runs all 21 in one invocation.
+# What this config exists to do is put the whole path under load at once: the
+# archive's coverage decides which months each symbol has, the point-in-time
+# Universe is reconstructed from that coverage, policy removes what we would not
+# hold, the CoinMarketCap panel supplies the weights, and the simulator marks
+# every day of every holding period.
+#
+# The window sits inside the Development Sample (through 2023-12-31), so running
+# this spends none of the Holdout.
+#
+# Per ADR-0004 this is long-only unlevered spot: no short leg, no leverage, and
+# no Trend Gate. A risk overlay the paper did not have would invalidate the
+# comparison the Replication Gate is for.
+
+name = "xsec-l14-h7-2021h1"
+
+[data]
+venue = "binance-spot"
+interval = "1d"
+start_month = "2021-01"
+end_month = "2021-06"
+
+# The USDT pairs Binance had listed before the window opens, so no name enters
+# the cross-section mid-run on a listing this config chose with hindsight. The
+# archive still decides tradeability per date: a symbol here that the archive
+# publishes no bars for on a date is untradeable on it, whatever this list says.
+#
+# Stablecoins and Wrapped Assets are not listed here and would be removed by
+# `policy/exclusions-v1.toml` if they were — the exclusion list is the authority,
+# not this list, so the two cannot disagree silently.
+symbols = [
+  "BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "XRPUSDT",
+  "DOGEUSDT", "LTCUSDT", "LINKUSDT", "DOTUSDT", "BCHUSDT",
+  "XLMUSDT", "TRXUSDT", "EOSUSDT", "ETCUSDT", "VETUSDT",
+  "FILUSDT", "THETAUSDT", "AAVEUSDT", "ATOMUSDT", "NEOUSDT",
+]
+
+[strategy]
+kind = "cross_sectional"
+# Two weeks of past return, ranked across the cross-section and formed strictly
+# before the Decision Bar.
+lookback_days = 14
+# Weekly, per the paper's rebalance convention. One portfolio, not the paper's
+# five overlapping sub-portfolios: that scheme spreads execution in deployment
+# and is not part of what is being replicated.
+holding_days = 7
+# The top quintile.
+quantile = 0.2
+
+[universe]
+# The upper bound of the bracket. The lower bound — today's Tokocrypto list — is
+# the same config with `bracket = "tokocrypto"`, and the gap between the two is
+# venue-listing risk and a result in its own right.
+bracket = "binance-full"
+# A data-quality gate on artefacted bars, not a capacity constraint: at USD
+# 5,000-10,000 deployed, capacity binds on nothing in this cross-section.
+liquidity_floor_usd = 250000.0
+
+[costs]
+# ADR-0007: Tokocrypto charges 0.15% fee + 0.21% PPh + 0.0444% levy per side, on
+# buys as well as sells. At a weekly rebalance this is the binding constraint,
+# not the signal.
+fee_bps_per_side = 40.44
+slippage_bps_per_side = 5.0

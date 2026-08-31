@@ -14,15 +14,37 @@ from typing import Any
 
 import pandas as pd
 
-from crypto_momentum.config import RunConfig, load_config
+from crypto_momentum.config import CROSS_SECTIONAL, RunConfig, load_config
 from crypto_momentum.data.binance_archive import monthly_klines_file
+from crypto_momentum.data.cmc_panel import CmcPanelStore
 from crypto_momentum.data.fetch import UrlOpener, fetch_archive_file
-from crypto_momentum.data.raw_store import RawStore
-from crypto_momentum.derive import DerivedStore, rebuild_daily_bars
+from crypto_momentum.data.market_caps import market_cap_panel
+from crypto_momentum.data.raw_store import RawStore, RawWindowMissing
+from crypto_momentum.data.universe import (
+    SymbolCoverage,
+    bar_span_from_bars,
+    build_universe_panel,
+    coverage_for_symbol,
+)
+from crypto_momentum.derive import DerivedStore, build_daily_bars, rebuild_daily_bars
+from crypto_momentum.policy import (
+    EXCLUSIONS_FILENAME,
+    TOKOCRYPTO_LISTING_FILENAME,
+    load_exclusion_list,
+    load_venue_listing,
+    policy_root,
+)
 from crypto_momentum.provenance import describe_head
 from crypto_momentum.results import ResultStore, RunRecord
 from crypto_momentum.sim.buy_and_hold import simulate_buy_and_hold
+from crypto_momentum.sim.cross_sectional import CrossSectionalRun, simulate_cross_sectional
 from crypto_momentum.sim.report import RunResult
+from crypto_momentum.sim.universe_policy import (
+    TOKOCRYPTO,
+    LiquidityFloor,
+    apply_universe_policy,
+    dollar_volume_from_bars,
+)
 from crypto_momentum.trials import TRIALS_FILENAME, append_trial
 
 # Timestamps that cross the JSON boundary are second-resolution UTC throughout.
@@ -68,8 +90,14 @@ def run_config(
     config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
     provenance = describe_head(workspace.repo_root)
 
-    bars = load_bars(config, workspace, fetched_at_utc=run_at_utc, open_url=open_url)
-    result = simulate_buy_and_hold(bars, cost_bps_per_side=config.cost_bps_per_side)
+    if config.strategy_kind == CROSS_SECTIONAL:
+        metrics, window, portfolio = _run_cross_sectional(
+            config, workspace, run_at_utc=run_at_utc, open_url=open_url
+        )
+    else:
+        metrics, window, portfolio = _run_single_asset(
+            config, workspace, run_at_utc=run_at_utc, open_url=open_url
+        )
 
     record = RunRecord(
         commit=provenance.commit,
@@ -78,17 +106,191 @@ def run_config(
         config=config,
         config_sha256=config_sha256,
         config_path=_relative_to_repo(config_path, workspace.repo_root),
-        metrics=metrics_of(result),
-        window={
+        metrics=metrics,
+        window=window,
+        portfolio=portfolio,
+    )
+    ResultStore(workspace.results_root).write(record)
+    append_trial(workspace.trials_path, record.trial_line())
+    return record
+
+
+def _run_single_asset(
+    config: RunConfig,
+    workspace: Workspace,
+    *,
+    run_at_utc: str,
+    open_url: UrlOpener | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """The walking skeleton's path: one symbol, held from the fill to the end."""
+    bars = load_bars(config, workspace, fetched_at_utc=run_at_utc, open_url=open_url)
+    result = simulate_buy_and_hold(bars, cost_bps_per_side=config.cost_bps_per_side)
+    return (
+        metrics_of(result),
+        {
             "months": config.months(),
             "first_bar_ts_utc": _iso(bars.index[0]),
             "last_bar_ts_utc": _iso(bars.index[-1]),
             "n_bars": len(bars),
         },
+        {},
     )
-    ResultStore(workspace.results_root).write(record)
-    append_trial(workspace.trials_path, record.trial_line())
-    return record
+
+
+def _run_cross_sectional(
+    config: RunConfig,
+    workspace: Workspace,
+    *,
+    run_at_utc: str,
+    open_url: UrlOpener | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """The cross-sectional path, where the three layers meet.
+
+    In order: the archive says which months each symbol ever published and the
+    bars are built from those; the point-in-time Universe is reconstructed from
+    that same coverage, narrowed to the days real bars exist for; policy removes
+    what we would not consider holding; the vendor panel supplies the weights;
+    and only then does the simulator see anything.
+
+    Nothing here reaches past the run's own window, and nothing in the
+    simulation core reaches back out to a store.
+    """
+    bars_by_symbol, coverages = load_cross_section(
+        config, workspace, fetched_at_utc=run_at_utc, open_url=open_url
+    )
+    panel = build_universe_panel(
+        coverages,
+        start=_window_start(config),
+        end=_window_end(config),
+        bar_span_by_symbol={
+            symbol: bar_span_from_bars(bars) for symbol, bars in bars_by_symbol.items()
+        },
+    )
+
+    policy = policy_root(workspace.repo_root)
+    floor = (
+        LiquidityFloor(
+            floor_usd=config.liquidity_floor_usd,
+            window_days=config.liquidity_window_days,
+        )
+        if config.liquidity_floor_usd is not None
+        else None
+    )
+    dollar_volume = dollar_volume_from_bars(bars_by_symbol)
+    after_policy = apply_universe_policy(
+        panel,
+        exclusions=load_exclusion_list(policy / EXCLUSIONS_FILENAME),
+        bracket=config.bracket,
+        # The lower bound of the bracket is the only one that needs a listing,
+        # but it is loaded either way so the two ends run off one artefact.
+        venue_listing=load_venue_listing(policy / TOKOCRYPTO_LISTING_FILENAME),
+        dollar_volume=dollar_volume if floor is not None else None,
+        floor=floor,
+    )
+
+    caps = market_cap_panel(
+        CmcPanelStore(workspace.raw_root).read_panel(),
+        config.universe_symbols,
+        repo_root=workspace.repo_root,
+    )
+    run = simulate_cross_sectional(
+        bars_by_symbol,
+        tradeable=after_policy.tradeable,
+        market_caps=caps,
+        lookback_days=config.lookback_days,
+        holding_days=config.holding_days,
+        quantile=config.quantile,
+        min_universe=config.min_universe,
+        max_cap_staleness_days=config.max_cap_staleness_days,
+        cost_bps_per_side=config.cost_bps_per_side,
+    )
+
+    spans = [bars.index for bars in bars_by_symbol.values()]
+    return (
+        metrics_of(run.result),
+        {
+            "months": config.months(),
+            "first_bar_ts_utc": _iso(min(span[0] for span in spans)),
+            "last_bar_ts_utc": _iso(max(span[-1] for span in spans)),
+            "n_symbols": len(bars_by_symbol),
+            "n_bars_by_symbol": {
+                symbol: len(bars) for symbol, bars in sorted(bars_by_symbol.items())
+            },
+            "universe": after_policy.metadata,
+        },
+        run.to_metadata(),
+    )
+
+
+def load_cross_section(
+    config: RunConfig,
+    workspace: Workspace,
+    *,
+    fetched_at_utc: str,
+    open_url: UrlOpener | None = None,
+) -> tuple[dict[str, pd.DataFrame], list[SymbolCoverage]]:
+    """Bars for every symbol in the cross-section, and the coverage behind them.
+
+    A symbol is fetched only for the months the archive actually publishes it
+    in. Asking a delisted asset for a month after it stopped trading is a 404
+    that reads like a network fault; asking coverage first turns it into the
+    fact it is, which is that the asset was gone by then.
+
+    A symbol the archive never published at this interval, or published nothing
+    for inside the window, is dropped rather than carried as an empty column.
+    Its absence is visible in the Universe metadata, which counts the symbols
+    that made it in.
+    """
+    raw_store = RawStore(workspace.raw_root)
+    derived_store = DerivedStore(workspace.derived_root)
+    wanted = set(config.months())
+
+    bars_by_symbol: dict[str, pd.DataFrame] = {}
+    coverages: list[SymbolCoverage] = []
+    for symbol in config.universe_symbols:
+        coverage = coverage_for_symbol(symbol, config.interval, open_url=open_url)
+        months = [month for month in config.months() if month in set(coverage.months)]
+        if not months:
+            continue
+        for month in months:
+            archive_file = monthly_klines_file(symbol, config.interval, month)
+            if raw_store.has(archive_file):
+                continue
+            payload, digest = fetch_archive_file(archive_file, open_url=open_url)
+            raw_store.write(
+                archive_file, payload, sha256=digest, fetched_at_utc=fetched_at_utc
+            )
+        bars = build_daily_bars(raw_store, symbol, config.interval, months)
+        derived_store.write_bars(symbol, config.interval, bars)
+        bars_by_symbol[symbol] = bars
+        # The coverage handed to the panel is clipped to the run's own window, so
+        # a symbol is not marked tradeable on months this run never looked at.
+        coverages.append(
+            SymbolCoverage(
+                symbol=symbol,
+                interval=coverage.interval,
+                months=tuple(months),
+                daily_only_dates=tuple(
+                    day for day in coverage.daily_only_dates if day[:7] in wanted
+                ),
+            )
+        )
+    if not bars_by_symbol:
+        raise RawWindowMissing(
+            f"the archive publishes no {config.interval} bars for any of "
+            f"{', '.join(config.universe_symbols)} in {config.start_month} to "
+            f"{config.end_month}"
+        )
+    return bars_by_symbol, coverages
+
+
+def _window_start(config: RunConfig) -> pd.Timestamp:
+    return pd.Timestamp(f"{config.start_month}-01T00:00:00Z")
+
+
+def _window_end(config: RunConfig) -> pd.Timestamp:
+    start = pd.Timestamp(f"{config.end_month}-01T00:00:00Z")
+    return start + pd.offsets.MonthEnd(0)
 
 
 def load_bars(
@@ -128,6 +330,38 @@ def rebuild_derived(config: RunConfig, workspace: Workspace) -> pd.DataFrame:
         config.interval,
         config.months(),
     )
+
+
+def rebuild_all_derived(
+    config: RunConfig, workspace: Workspace
+) -> dict[str, pd.DataFrame]:
+    """Rebuild every symbol the config names, from whatever is in `data/raw/`.
+
+    Fetches nothing, and lists nothing: this is the path a researcher takes
+    after deleting `data/derived/`, and it must work with the network unplugged.
+    A symbol is rebuilt from the months actually stored for it, so a run that
+    only ever fetched a delisted asset's live months rebuilds exactly those.
+    """
+    raw_store = RawStore(workspace.raw_root)
+    derived_store = DerivedStore(workspace.derived_root)
+    built: dict[str, pd.DataFrame] = {}
+    for symbol in config.universe_symbols:
+        months = [
+            month
+            for month in config.months()
+            if raw_store.has(monthly_klines_file(symbol, config.interval, month))
+        ]
+        if not months:
+            continue
+        built[symbol] = rebuild_daily_bars(
+            raw_store, derived_store, symbol, config.interval, months
+        )
+    if not built:
+        raise RawWindowMissing(
+            f"data/raw/ holds no {config.interval} months for "
+            f"{', '.join(config.universe_symbols)}; run the config to fetch them"
+        )
+    return built
 
 
 def metrics_of(result: RunResult) -> dict[str, Any]:
