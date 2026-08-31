@@ -27,6 +27,9 @@ from crypto_momentum.data.fetch import UrlOpener, download
 # host in front of it serves objects but not the ListBucket XML.
 LISTING_ENDPOINT = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 KLINES_PREFIX = "data/spot/monthly/klines/"
+# The archive rolls a month into a monthly partition only once the month is
+# over. Until then its days exist solely here, one file per day.
+DAILY_KLINES_PREFIX = "data/spot/daily/klines/"
 
 # S3 caps a page at 1000 keys and reports `IsTruncated` when it does.
 MAX_KEYS_PER_PAGE = 1000
@@ -108,10 +111,16 @@ def parse_listing_page(payload: bytes) -> ListingPage:
 def walk_listing(
     prefix: str,
     *,
+    start_after: str | None = None,
     open_url: UrlOpener | None = None,
     max_keys: int = MAX_KEYS_PER_PAGE,
 ) -> Listing:
     """Page through the whole of `prefix` and return everything under it.
+
+    `start_after` is an exclusive lower bound on the key, passed to S3 as the
+    opening marker. It is how a caller asks for only the tail of a prefix — the
+    days after the last rolled-up month — in one request rather than by listing
+    everything and discarding most of it.
 
     The only function in this module that opens a socket. `open_url` is injected
     so every test above it runs against recorded pages.
@@ -119,7 +128,7 @@ def walk_listing(
     opener = open_url or download
     prefixes: list[str] = []
     keys: list[str] = []
-    marker: str | None = None
+    marker: str | None = start_after
     for _ in range(_MAX_PAGES):
         page = parse_listing_page(opener(listing_url(prefix, marker=marker, max_keys=max_keys)))
         prefixes.extend(page.prefixes)

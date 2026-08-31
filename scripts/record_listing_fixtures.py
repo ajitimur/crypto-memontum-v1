@@ -26,7 +26,10 @@ from pathlib import Path
 sys.path.insert(0, "src")
 
 from crypto_momentum.data.archive_listing import (
+    DAILY_KLINES_PREFIX,
     KLINES_PREFIX,
+    MAX_KEYS_PER_PAGE,
+    ListingPage,
     listing_url,
     parse_listing_page,
 )
@@ -41,7 +44,12 @@ def get(url: str) -> bytes:
         return response.read()
 
 
-def record(name: str, prefix: str, marker: str | None = None, max_keys: int = 1000):
+def record(
+    name: str,
+    prefix: str,
+    marker: str | None = None,
+    max_keys: int = MAX_KEYS_PER_PAGE,
+) -> ListingPage:
     payload = get(listing_url(prefix, marker=marker, max_keys=max_keys))
     page = parse_listing_page(payload)
     (OUT / name).write_bytes(payload)
@@ -50,6 +58,12 @@ def record(name: str, prefix: str, marker: str | None = None, max_keys: int = 10
         f"keys={len(page.keys)} truncated={page.is_truncated}"
     )
     return page
+
+
+def record_daily_tail(name: str, symbol: str, after_month: str) -> ListingPage:
+    """The days published after `after_month` was rolled into a monthly partition."""
+    prefix = f"{DAILY_KLINES_PREFIX}{symbol}/1d/"
+    return record(name, prefix, marker=f"{prefix}{symbol}-1d-{after_month}-99")
 
 
 def main() -> None:
@@ -69,6 +83,9 @@ def main() -> None:
 
     record("SRMUSDT-1d.xml", f"{KLINES_PREFIX}SRMUSDT/1d/")
     record("BTCUSDT-1d.xml", f"{KLINES_PREFIX}BTCUSDT/1d/")
+    # A live symbol's running month, and a delisted one's empty tail.
+    record_daily_tail("BTCUSDT-1d-daily-tail.xml", "BTCUSDT", "2026-07")
+    record_daily_tail("SRMUSDT-1d-daily-tail.xml", "SRMUSDT", "2022-11")
 
 
 if __name__ == "__main__":

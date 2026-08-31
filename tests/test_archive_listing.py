@@ -12,33 +12,7 @@ from crypto_momentum.data.archive_listing import (
     parse_listing_page,
     walk_listing,
 )
-from crypto_momentum.data.fetch import ArchiveUnavailable
-
-SR_PREFIX = "data/spot/monthly/klines/SR"
-SR_PAGES = ("klines-SR-page1.xml", "klines-SR-page2.xml", "klines-SR-page3.xml")
-# The recorded SR pages were listed two keys at a time to force pagination.
-SR_MAX_KEYS = 2
-
-
-def paged_opener(recorded_listing_page, prefix, page_names, max_keys):
-    """Serve the recorded pages under `prefix`, chained by their own markers."""
-    served = {}
-    marker = None
-    for name in page_names:
-        payload = recorded_listing_page(name)
-        served[listing_url(prefix, marker=marker, max_keys=max_keys)] = payload
-        marker = parse_listing_page(payload).next_marker
-
-    def open_url(url: str) -> bytes:
-        if url not in served:
-            raise ArchiveUnavailable(f"no recorded page for {url}")
-        return served[url]
-
-    return open_url
-
-
-def single_page_opener(recorded_listing_page, prefix, name, max_keys=1000):
-    return paged_opener(recorded_listing_page, prefix, (name,), max_keys)
+from conftest import SR_PAGES, SR_PREFIX
 
 
 def test_a_delimited_page_reports_its_directories_and_its_marker(recorded_listing_page):
@@ -68,12 +42,8 @@ def test_a_file_listing_reports_object_keys(recorded_listing_page):
     assert len(page.keys) == 56
 
 
-def test_a_truncated_listing_is_paged_through_to_the_end(recorded_listing_page):
-    listing = walk_listing(
-        SR_PREFIX,
-        open_url=paged_opener(recorded_listing_page, SR_PREFIX, SR_PAGES, SR_MAX_KEYS),
-        max_keys=SR_MAX_KEYS,
-    )
+def test_a_truncated_listing_is_paged_through_to_the_end(recorded_bucket):
+    listing = walk_listing(SR_PREFIX, open_url=recorded_bucket({SR_PREFIX: SR_PAGES}))
 
     assert listing.prefixes == (
         "data/spot/monthly/klines/SRMBIDR/",
